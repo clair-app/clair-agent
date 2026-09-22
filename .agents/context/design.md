@@ -12,7 +12,7 @@ Companions in that repository: ADR 2026-09.ew4t (the decision record for the rel
 `.agents/context/bridge-ingress.md` (the five endpoints the agent tunnels, with their exact
 status codes, size cap and bearer contract), `.agents/context/protocol.md` (the phone ↔
 watch protocol, for vocabulary only — the agent never touches it), and `:shared/relay`
-(the golden vectors, `RelayVectorsTest` — **not written yet**, see "Vectors" below).
+(the golden vectors, `RelayVectorsTest`, see "Vectors" below).
 
 The relay is `clair-server` (a sibling checkout at `../clair-server`, NestJS on
 Vercel). **Where its plan and RELAY.md disagree, the relay's pins win** and are listed under
@@ -101,12 +101,14 @@ here): the `X-Clair-Idle-Ms` header, `cancel.reason`, `hello.presence` / the `po
 
 ## Vectors
 
-`:shared/relay` has not published `relay-vectors.json` yet. `internal/envelope/vectors_test.go`
-holds the loader and the proposed schema (pinned `k`, both key pairs, derived keys, and per
-envelope the header, `nonce`, exact `recordBytes`, `aad` and `ct`, all base64url) and skips
-with a named reason until the file is copied into `internal/envelope/testdata/`. Until then
-the crypto is pinned by RFC 5869 A.1 and draft-irtf-cfrg-xchacha A.3.1 through our layout,
-plus an independent HKDF in the tests.
+`internal/envelope/testdata/relay-vectors.json` is `:shared/relay`'s `relay-vectors.json`
+(`RelayVectorsTest`), copied unchanged; the comment beside the loader in
+`internal/envelope/vectors_test.go` names the clair commit it was taken from, and a refresh
+updates both. The schema (pinned `k`, both key pairs, derived keys, and per envelope the
+header, `nonce`, exact `recordBytes`, `aad` and `ct`, all base64url) is shared with the phone,
+so a vector that fails is a bug in one of the two implementations, never a fixture to edit.
+The crypto is independently pinned by RFC 5869 A.1 and draft-irtf-cfrg-xchacha A.3.1 through
+our layout, plus an independent HKDF in the tests.
 
 ## Numbers that are *draft*
 

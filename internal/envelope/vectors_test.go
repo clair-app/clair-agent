@@ -12,8 +12,8 @@ import (
 )
 
 // vectorsPath is the golden file from `:shared/relay` in the clair repository
-// (RelayVectorsTest), copied unchanged. Record the clair commit it was taken
-// from here when it lands: <not yet published — the phone has no relay code>.
+// (RelayVectorsTest, shared/relay/src/test/resources/relay-vectors.json), copied
+// unchanged from clair commit d6d2a15.
 const vectorsPath = "testdata/relay-vectors.json"
 
 // vectors is the file's schema, proposed to the phone side: every value is
@@ -58,7 +58,7 @@ func TestVectors(t *testing.T) {
 
 	f, err := openTestdata(vectorsPath)
 	if errors.Is(err, fs.ErrNotExist) {
-		t.Skipf("%s is absent: the phone's :shared/relay has not published RelayVectorsTest's file yet", vectorsPath)
+		t.Skipf("%s is absent: copy shared/relay/src/test/resources/relay-vectors.json from the clair repository", vectorsPath)
 	}
 	if err != nil {
 		t.Fatalf("open %s: %v", vectorsPath, err)
