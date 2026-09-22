@@ -6,6 +6,7 @@
 package relaytest
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -578,18 +579,18 @@ func (f *Fake) ack(w http.ResponseWriter, who authed, pairID string, body []byte
 	if !ok {
 		return
 	}
+	// The relay's schema is strict: {cursor} is a non-negative JSON integer,
+	// never a string.
 	var req struct {
-		Cursor relay.Cursor `json:"cursor"`
+		Cursor *int64 `json:"cursor"`
 	}
-	if json.Unmarshal(body, &req) != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request"})
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&req) != nil || req.Cursor == nil || *req.Cursor < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_body"})
 		return
 	}
-	cursor, err := strconv.ParseInt(string(req.Cursor), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request"})
-		return
-	}
+	cursor := *req.Cursor
 	inbound := outbound(role).Opposite()
 	f.mu.Lock()
 	kept := f.rows[:0]

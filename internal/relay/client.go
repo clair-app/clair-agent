@@ -606,11 +606,16 @@ func batch(encoded [][]byte) (n int, body []byte) {
 }
 
 // Ack tells the relay every inbound row up to and including cursor was applied
-// (POST /v1/pairs/{pair}/ack).
+// (POST /v1/pairs/{pair}/ack). The relay takes the cursor back as the JSON
+// integer it is, not the string Cursor marshals as.
 func (c *Client) Ack(ctx context.Context, pair string, cursor Cursor) error {
+	n, err := strconv.ParseUint(string(cursor), 10, 63)
+	if err != nil {
+		return fmt.Errorf("relay: ack cursor %q is not a non-negative integer", string(cursor))
+	}
 	body, err := json.Marshal(struct {
-		Cursor Cursor `json:"cursor"`
-	}{cursor})
+		Cursor uint64 `json:"cursor"`
+	}{n})
 	if err != nil {
 		return fmt.Errorf("relay: encode ack: %w", err)
 	}

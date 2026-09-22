@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -144,6 +145,33 @@ func TestSignatureRefusalIsNotRetried(t *testing.T) {
 	var serr *relay.StatusError
 	if !errors.As(err, &serr) || serr.Reason != "signature" {
 		t.Errorf("err = %#v, want a *StatusError with reason signature", err)
+	}
+}
+
+// The relay's ack schema is a strict {cursor: integer}: a string cursor is a
+// 400 invalid_body, so Ack must send the number back, not Cursor's string.
+func TestAckSendsTheCursorAsANumber(t *testing.T) {
+	t.Parallel()
+
+	bodies := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies <- string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	client, err := relay.New(newIdentity(t).Auth(), relay.Options{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("relay.New: %v", err)
+	}
+	if err := client.Ack(t.Context(), "p", "1387"); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if got := <-bodies; got != `{"cursor":1387}` {
+		t.Errorf("ack body = %s, want {\"cursor\":1387}", got)
+	}
+	if err := client.Ack(t.Context(), "p", "not-a-cursor"); err == nil {
+		t.Error("Ack of a non-numeric cursor: want an error")
 	}
 }
 
