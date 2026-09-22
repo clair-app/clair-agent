@@ -1,0 +1,87 @@
+# Clair agent CI. Every job is a `make` target, so a red job reproduces locally with
+# the same command and the same pinned tool versions (see the Makefile).
+stages: [check, build]
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+variables:
+  # Keep the module cache and the ./bin tools between runs; both are keyed below.
+  GOPATH: "$CI_PROJECT_DIR/.go"
+  GOMODCACHE: "$CI_PROJECT_DIR/.go/pkg/mod"
+  GOCACHE: "$CI_PROJECT_DIR/.go/build-cache"
+  GOFLAGS: "-mod=readonly"
+  GOTOOLCHAIN: "local"   # the image's Go is the Go; never auto-download another
+
+.go:
+  # The minor matches go.mod's `go` line; the image carries the newest patch.
+  image: golang:1.26
+  interruptible: true
+  cache:
+    - key:
+        files: [go.sum, Makefile]
+        prefix: go
+      paths: [.go/pkg/mod/, .go/build-cache/, bin/]
+  before_script:
+    - go version
+    - make tools
+
+# No Go build needed, but the tool is Go: this only reads `.agents/memory/decisions/`.
+# Enforced (not advisory) because a stale router silently hides a decision from every
+# agent that reads it, and `merge=union` on the generated file means a bad merge lands
+# quietly rather than as a conflict. `.githooks/pre-commit` runs the same check against
+# the staged tree; this is the backstop.
+adr-index:
+  extends: .go
+  stage: check
+  before_script: []
+  script: make adr-check
+
+# Tidy go.mod/go.sum and gofumpt/goimports-clean sources; both are autocorrectable
+# (`make tidy`, `make fmt`), so a red job here is a forgotten step, not a finding.
+format:
+  extends: .go
+  stage: check
+  script:
+    - make tidy-check
+    - make fmt-check
+
+lint:
+  extends: .go
+  stage: check
+  script: make lint
+
+test:
+  extends: .go
+  stage: check
+  script:
+    - make test
+    - go tool cover -func=coverage.out | tail -1
+  coverage: '/^total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    when: always
+    paths: [coverage.out]
+    expire_in: 2 weeks
+
+# Advisory today (allow_failure) because a new CVE in a dependency should not block an
+# unrelated merge; it should be seen. Flip to blocking once the agent handles keys.
+vuln:
+  extends: .go
+  stage: check
+  allow_failure: true
+  script: make vuln
+
+build:
+  extends: .go
+  stage: build
+  before_script: []
+  script:
+    - make build
+    - bin/clair version
+    - make build-all
+  artifacts:
+    paths: [dist/]
+    expire_in: 2 weeks

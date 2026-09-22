@@ -1,0 +1,19 @@
+# Build outputs. ./bin also holds the pinned tools `make tools` installs.
+/bin/
+/dist/
+# A bare `go build ./cmd/clair` drops the binary here.
+/clair
+/clair.exe
+coverage.out
+*.test
+*.prof
+
+# IDE and OS.
+.idea/
+.vscode/
+.DS_Store
+
+# Personal per-machine Claude Code overrides — anything shared in .claude/ stays tracked.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/

@@ -1,0 +1,226 @@
+# golangci-lint v2 configuration. `make lint` runs it with the version pinned in
+# the Makefile; `make fmt` applies the formatters section.
+#
+# The linter set is explicit (`default: none`) so a golangci-lint upgrade never
+# silently changes what is enforced. Anything not listed is off on purpose: the
+# complexity meters (cyclop, funlen, gocognit, nestif), the magic-number and
+# line-length police, and the style-only sets (wsl, nlreturn, varnamelen) were
+# judged more noise than signal for a small daemon. Add one with a reason.
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # The standard five.
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # Correctness.
+    - asasalint
+    - bidichk
+    - bodyclose
+    - contextcheck
+    - copyloopvar
+    - durationcheck
+    - errchkjson
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - forcetypeassert
+    - gocheckcompilerdirectives
+    - gochecksumtype
+    - gosec
+    - iotamixing
+    - makezero
+    - musttag
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - noctx
+    - reassign
+    - recvcheck
+    - rowserrcheck
+    - sqlclosecheck
+    - wastedassign
+    # Dependencies and API shape.
+    - depguard
+    - gomoddirectives
+    - iface
+    - inamedparam
+    - errname
+    # Idiom and modernity (Go 1.22+ ranges, min/max, slices, strings.SplitSeq …).
+    - exptostd
+    - gocritic
+    - intrange
+    - mirror
+    - modernize
+    - perfsprint
+    - prealloc
+    - predeclared
+    - revive
+    - sloglint
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - usetesting
+    # Comments and hygiene.
+    - canonicalheader
+    - containedctx
+    - dupword
+    - embeddedstructfieldcheck
+    - gochecknoinits
+    - godot
+    - goprintffuncname
+    - misspell
+    - nakedret
+    - nolintlint
+    - nosprintfhostport
+    - whitespace
+    # Tests.
+    - testableexamples
+    - thelper
+    - tparallel
+
+  settings:
+    depguard:
+      # A strict allow-list: a new dependency is a deliberate edit here, with the
+      # reason in the commit (see .agents/rules/go.md). RELAY.md §5.5 names
+      # golang.org/x/crypto; the rest of x/ is the same stewardship.
+      rules:
+        main:
+          list-mode: strict
+          allow:
+            - $gostd
+            - claircode.app/clair-agent
+            - golang.org/x
+    errcheck:
+      check-type-assertions: true
+      # Writes to stdout/stderr and http.ResponseWriter: the idiom is to let
+      # them go. A socket gets a bufio.Writer and a checked Flush.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    exhaustive:
+      default-signifies-exhaustive: true
+    gocritic:
+      enabled-tags: [diagnostic, style, performance]
+      disabled-checks:
+        - hugeParam      # a 100-byte struct by value is fine; flags every options type
+        - importShadow   # `url`, `path` as parameter names are idiomatic
+        - sloppyReassign # contradicts govet's shadow check, which catches real bugs
+        - unnamedResult  # named results are used where they document, not everywhere
+        - whyNoLint      # nolintlint enforces the explanation
+    godot:
+      scope: toplevel
+      capital: true
+    gosec:
+      excludes:
+        - G304  # file path from a variable: every path the tools open is repo-relative by construction
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment  # micro-optimisation; the struct order follows the reader
+      settings:
+        shadow:
+          strict: false
+    misspell:
+      locale: UK
+      ignore-rules: [analyze, analyzer, initialize, serialize, serialization, marshal, marshaling, unmarshal, unmarshaling, color]
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    perfsprint:
+      strconcat: false
+    revive:
+      severity: warning
+      rules:
+        - name: atomic
+        - name: bare-return
+        - name: blank-imports
+        - name: bool-literal-in-expr
+        - name: confusing-naming
+        - name: constant-logical-expr
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: datarace
+        - name: defer
+        - name: dot-imports
+        - name: duplicated-imports
+        - name: early-return
+        - name: empty-block
+        - name: empty-lines
+        - name: enforce-map-style
+          arguments: [make]
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: identical-branches
+        - name: if-return
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: modifies-value-receiver
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: redundant-import-alias
+        - name: string-of-int
+        - name: struct-tag
+        - name: superfluous-else
+        - name: time-equal
+        - name: unchecked-type-assertion
+        - name: unconditional-recursion
+        - name: unexported-return
+        - name: unnecessary-stmt
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: unused-receiver
+        - name: use-any
+        - name: useless-break
+        - name: var-declaration
+        - name: var-naming
+        - name: waitgroup-by-value
+    sloglint:
+      no-mixed-args: true
+      kv-only: true
+      attr-only: false
+      static-msg: true
+      key-naming-case: snake
+    staticcheck:
+      checks: ["all"]
+    usetesting:
+      os-temp-dir: true
+
+  exclusions:
+    generated: lax
+    warn-unused: true
+    rules:
+      # Tests may ignore Close errors, assert types and use fixed permissions.
+      - path: _test\.go
+        linters: [errcheck, forcetypeassert, gosec]
+      # The dev tools write repo files at 0644/0755 on purpose; G301/2/6 want 0750/0600.
+      - path: ^tools/
+        linters: [gosec]
+        text: "G30[126]"
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      module-path: claircode.app/clair-agent
+      extra:
+        group-params: true
+    goimports:
+      local-prefixes: [claircode.app/clair-agent]

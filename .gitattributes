@@ -1,0 +1,17 @@
+# `.agents/memory/decisions.md` is a generated router (`go run ./tools/adr index`)
+# over `.agents/memory/decisions/`, and its only churn is appended table rows — one per
+# new ADR. When the repo is worked in several git worktrees at once, each one adding a
+# decision conflicts on that append every time, and the resolution is always "keep both
+# rows". `merge=union` does exactly that automatically, which is the whole point of the
+# one-file-per-decision split (see the tool's package comment).
+#
+# Union can duplicate a line if two branches edit the *preamble* rather than the table.
+# That is not a merge to resolve by hand either: rerun `go run ./tools/adr index` and it
+# overwrites the file wholesale. `go run ./tools/adr index -check` proves the committed
+# router matches the files it describes, and CI runs it.
+.agents/memory/decisions.md merge=union
+
+# Go sources are LF everywhere; gofmt would rewrite CRLF anyway.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf linguist-generated=true
