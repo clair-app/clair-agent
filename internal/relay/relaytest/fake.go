@@ -1,8 +1,9 @@
 // Package relaytest is an in-memory relay on httptest for the agent's tests:
 // it verifies Clair-Ed25519 signatures, holds pairings and per-pair
 // mailboxes, streams envelopes and presence over SSE with bounded ends, and
-// records what clients did. It implements the relay's contract as the agent
-// sees it (RELAY.md §7 as pinned by the relay's own plan), not the relay.
+// records what clients did. It implements the relay's published contract
+// (internal/relay/testdata/openapi.json, checked by the relay package's
+// contract test) for the routes the agent and the phone use, not the relay.
 package relaytest
 
 import (
@@ -14,8 +15,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,13 +33,23 @@ const ReadHeaderTimeout = 10 * time.Second
 
 // Limits the fake enforces, matching the relay's.
 const (
-	skewMax        = 300 * time.Second
-	maxBody        = envelope.MaxEnvelopeJSON
+	skewMax = 300 * time.Second
+	// The relay's JSON body parser takes up to 4.5 MiB, above the 4 MiB
+	// envelope and batch caps, so those answer with their own codes.
+	maxBody        = envelope.MaxEnvelopeJSON + envelope.MaxEnvelopeJSON/8
+	maxEnvelope    = envelope.MaxEnvelopeJSON
 	batchMax       = 100
 	pairingLife    = 10 * time.Minute
 	pairingGrace   = 15 * time.Minute
 	pollInterval   = 5 * time.Millisecond
 	defaultRetryMS = 10
+)
+
+// The relay's id shapes: a pair or pairing id, an X25519 key, a Last-Event-ID.
+var (
+	idPattern     = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
+	keyPattern    = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+	lastIDPattern = regexp.MustCompile(`^\d{1,15}$`)
 )
 
 // Recorded is one authenticated request the fake served.
@@ -101,8 +114,9 @@ type Fake struct {
 	Silent bool
 	// NoServerTime omits `serverTime` from 401 bodies (the Date fallback path).
 	NoServerTime bool
-	// NumericCursors sends cursors as JSON numbers instead of strings.
-	NumericCursors bool
+	// StringCursors sends receipt cursors as JSON strings instead of the
+	// relay's integers, for the tolerance relay.Cursor keeps.
+	StringCursors bool
 	// MailboxFull answers every upload 429 mailbox_full with Retry-After: 1.
 	MailboxFull bool
 	// FailNext makes the next FailNext authenticated requests answer 503.
@@ -243,6 +257,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(mustJSON(v))
 }
 
+// refuse answers the relay's error body with one of its stable codes.
+func refuse(w http.ResponseWriter, status int, code string) {
+	writeJSON(w, status, map[string]string{"error": code})
+}
+
 // mustJSON encodes a value the fake built itself; a failure is a bug in the fake.
 func mustJSON(v any) []byte {
 	data, err := json.Marshal(v)
@@ -257,6 +276,12 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
 		http.Error(w, "read", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxBody {
+		// The relay's body parser refuses it before the auth guard runs.
+		_, _ = io.Copy(io.Discard, r.Body)
+		refuse(w, http.StatusRequestEntityTooLarge, "payload_too_large")
 		return
 	}
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
@@ -275,8 +300,6 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case fail:
 		http.Error(rec, "cold start", http.StatusServiceUnavailable)
-	case len(body) > maxBody:
-		writeJSON(rec, http.StatusRequestEntityTooLarge, map[string]string{"error": "too_large"})
 	default:
 		f.route(rec, r, who, body)
 	}
@@ -306,7 +329,7 @@ func (f *Fake) authenticate(w http.ResponseWriter, r *http.Request, body []byte)
 	now := f.Now()
 	noServerTime := f.NoServerTime
 	f.mu.Unlock()
-	refuse := func(reason string) bool {
+	unauthorized := func(reason string) bool {
 		resp := map[string]any{"error": "unauthorized", "reason": reason}
 		if !noServerTime {
 			resp["serverTime"] = now.Unix()
@@ -318,33 +341,39 @@ func (f *Fake) authenticate(w http.ResponseWriter, r *http.Request, body []byte)
 	header := r.Header.Get("Authorization")
 	scheme, params, found := strings.Cut(header, " ")
 	if !found || scheme != "Clair-Ed25519" {
-		return authed{}, refuse("malformed")
+		return authed{}, unauthorized("malformed")
 	}
 	fields := make(map[string]string)
 	for part := range strings.SplitSeq(params, ",") {
 		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok {
-			return authed{}, refuse("malformed")
+			return authed{}, unauthorized("malformed")
 		}
 		fields[k] = v
 	}
 	key, err := base64.RawURLEncoding.Strict().DecodeString(fields["key"])
 	if err != nil || len(key) != ed25519.PublicKeySize {
-		return authed{}, refuse("malformed")
+		return authed{}, unauthorized("malformed")
 	}
 	sig, err := base64.RawURLEncoding.Strict().DecodeString(fields["sig"])
 	if err != nil || len(sig) != ed25519.SignatureSize {
-		return authed{}, refuse("malformed")
+		return authed{}, unauthorized("malformed")
 	}
 	ts, err := strconv.ParseInt(fields["ts"], 10, 64)
 	if err != nil {
-		return authed{}, refuse("malformed")
-	}
-	if !ed25519.Verify(ed25519.PublicKey(key), relay.Canonical(r.Method, r.URL.RequestURI(), ts, body), sig) {
-		return authed{}, refuse("signature")
+		return authed{}, unauthorized("malformed")
 	}
 	if d := now.Unix() - ts; d > int64(skewMax/time.Second) || -d > int64(skewMax/time.Second) {
-		return authed{}, refuse("skew")
+		return authed{}, unauthorized("skew")
+	}
+	// The relay hashes the bytes its JSON parser consumed; any other body
+	// cannot be verified and is refused before the signature is checked.
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); len(body) > 0 && mt != "application/json" {
+		refuse(w, http.StatusUnsupportedMediaType, "unsupported_media_type")
+		return authed{}, false
+	}
+	if !ed25519.Verify(ed25519.PublicKey(key), relay.Canonical(r.Method, r.URL.RequestURI(), ts, body), sig) {
+		return authed{}, unauthorized("signature")
 	}
 	return authed{key: fields["key"], ts: ts}, true
 }
@@ -390,6 +419,7 @@ func (f *Fake) mintPairing(w http.ResponseWriter, who authed) {
 func (f *Fake) member(w http.ResponseWriter, who authed, pairID string) (Role, bool) {
 	f.mu.Lock()
 	p, ok := f.pairs[pairID]
+	ok = ok && idPattern.MatchString(pairID)
 	var role Role
 	revoked := false
 	if ok {
@@ -405,11 +435,11 @@ func (f *Fake) member(w http.ResponseWriter, who authed, pairID string) (Role, b
 	}
 	f.mu.Unlock()
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		refuse(w, http.StatusNotFound, "pair_not_found")
 		return "", false
 	}
 	if revoked {
-		writeJSON(w, http.StatusGone, map[string]string{"error": "revoked"})
+		refuse(w, http.StatusGone, "pair_revoked")
 		return "", false
 	}
 	return role, true
@@ -423,14 +453,47 @@ func outbound(role Role) envelope.Dir {
 	return envelope.DirP2H
 }
 
-func (f *Fake) completePairing(w http.ResponseWriter, who authed, id string, body []byte) {
-	var req struct {
-		PhonePub  string            `json:"phonePub"`
-		PushToken string            `json:"pushToken"`
-		Envelope  envelope.Envelope `json:"envelope"`
+// checkEnvelope validates one uploaded envelope as the relay does: its
+// schema, then that it names the route's pair and the caller's direction,
+// then the 4 MiB cap. A non-empty code is the refusal.
+func checkEnvelope(raw json.RawMessage, pair string, dir envelope.Dir) (env envelope.Envelope, status int, code string) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&env) != nil || !idPattern.MatchString(env.Pair) || env.Validate(env.Pair, env.Dir) != nil {
+		return env, http.StatusBadRequest, "invalid_envelope"
 	}
-	if err := json.Unmarshal(body, &req); err != nil || req.Envelope.Pair != id || req.Envelope.Dir != envelope.DirP2H {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request"})
+	switch {
+	case env.Pair != pair:
+		return env, http.StatusBadRequest, "pair_mismatch"
+	case env.Dir != dir:
+		return env, http.StatusBadRequest, "dir_mismatch"
+	case len(mustJSON(env)) > maxEnvelope:
+		return env, http.StatusRequestEntityTooLarge, "envelope_too_large"
+	}
+	return env, 0, ""
+}
+
+func (f *Fake) completePairing(w http.ResponseWriter, who authed, id string, body []byte) {
+	if !idPattern.MatchString(id) {
+		refuse(w, http.StatusNotFound, "pairing_not_found")
+		return
+	}
+	var req struct {
+		PhonePub  string          `json:"phonePub"`
+		PushToken *string         `json:"pushToken"`
+		Envelope  json.RawMessage `json:"envelope"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&req) != nil || !keyPattern.MatchString(req.PhonePub) || req.Envelope == nil ||
+		(req.PushToken != nil && (*req.PushToken == "" || len(*req.PushToken) > 4096)) {
+		refuse(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
+	// The hello is the first phone → host envelope; its pair is this pairing's id.
+	hello, status, code := checkEnvelope(req.Envelope, id, envelope.DirP2H)
+	if code != "" {
+		refuse(w, status, code)
 		return
 	}
 	f.mu.Lock()
@@ -438,13 +501,13 @@ func (f *Fake) completePairing(w http.ResponseWriter, who authed, id string, bod
 	p, ok := f.pairings[id]
 	switch {
 	case !ok:
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		refuse(w, http.StatusNotFound, "pairing_not_found")
 	case p.completed:
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "pairing_used"})
-	case f.Now().After(p.expiresAt):
-		writeJSON(w, http.StatusGone, map[string]string{"error": "pairing_expired"})
+		refuse(w, http.StatusConflict, "pairing_used")
+	case !f.Now().Before(p.expiresAt):
+		refuse(w, http.StatusGone, "pairing_expired")
 	default:
-		p.completed, p.phone, p.phonePub, p.hello = true, who.key, req.PhonePub, req.Envelope
+		p.completed, p.phone, p.phonePub, p.hello = true, who.key, req.PhonePub, hello
 		f.pairs[id] = &pairRec{host: p.host, phone: who.key}
 		writeJSON(w, http.StatusCreated, map[string]string{"pairId": id})
 	}
@@ -465,28 +528,39 @@ func sse(w http.ResponseWriter) func(string) bool {
 	}
 }
 
+// waitPairing is GET /v1/pairings/{id}/wait: `pending` at once, then
+// `completed` or `expired`. A completed pairing is served again until the
+// sweep removes it, pairingGrace past its expiry.
 func (f *Fake) waitPairing(w http.ResponseWriter, r *http.Request, who authed, id string) {
 	f.mu.Lock()
 	f.lastIDs = append(f.lastIDs, r.Header.Get("Last-Event-ID"))
 	p, ok := f.pairings[id]
-	if ok && p.host != who.key {
-		ok = false
+	ok = ok && p.host == who.key
+	var swept, expired bool
+	var pending []byte
+	if ok {
+		now := f.Now()
+		swept = now.After(p.expiresAt.Add(pairingGrace))
+		expired = !p.completed && !now.Before(p.expiresAt)
+		pending = mustJSON(map[string]any{"pairingId": id, "expiresAt": p.expiresAt.UTC().Format(time.RFC3339)})
 	}
-	expired := ok && f.Now().After(p.expiresAt.Add(pairingGrace))
 	f.mu.Unlock()
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+	if !ok || swept {
+		refuse(w, http.StatusNotFound, "pairing_not_found")
 		return
 	}
 	if expired {
-		writeJSON(w, http.StatusGone, map[string]string{"error": "pairing_expired"})
+		refuse(w, http.StatusGone, "pairing_expired")
 		return
 	}
 	write := sse(w)
+	if !write("id: 0\nevent: pending\ndata: " + string(pending) + "\n\n") {
+		return
+	}
 	for {
 		f.mu.Lock()
 		done := p.completed
-		gone := f.Now().After(p.expiresAt.Add(pairingGrace))
+		expired = !done && !f.Now().Before(p.expiresAt)
 		data := mustJSON(map[string]any{"pairId": id, "phonePub": p.phonePub, "envelope": p.hello})
 		retry := f.RetryMS
 		f.mu.Unlock()
@@ -495,7 +569,8 @@ func (f *Fake) waitPairing(w http.ResponseWriter, r *http.Request, who authed, i
 			write(fmt.Sprintf("id: 1\nretry: %d\n: reconnect\n\n", retry))
 			return
 		}
-		if gone {
+		if expired {
+			write("id: 1\nevent: expired\ndata: " + string(mustJSON(map[string]string{"pairingId": id})) + "\n\n")
 			return
 		}
 		select {
@@ -512,29 +587,24 @@ func (f *Fake) upload(w http.ResponseWriter, who authed, pairID string, body []b
 		return
 	}
 	dir := outbound(role)
-	var envs []envelope.Envelope
-	if strings.HasPrefix(strings.TrimSpace(string(body)), `{"envelopes"`) {
-		var batch struct {
-			Envelopes []envelope.Envelope `json:"envelopes"`
-		}
-		if err := json.Unmarshal(body, &batch); err != nil || len(batch.Envelopes) == 0 || len(batch.Envelopes) > batchMax {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request"})
-			return
-		}
-		envs = batch.Envelopes
-	} else {
-		var env envelope.Envelope
-		if err := json.Unmarshal(body, &env); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request"})
-			return
-		}
-		envs = []envelope.Envelope{env}
+	items, code := unwrapBatch(body)
+	if code != "" {
+		refuse(w, http.StatusBadRequest, code)
+		return
 	}
-	for _, env := range envs {
-		if env.Validate(pairID, dir) != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request"})
+	envs := make([]envelope.Envelope, 0, len(items))
+	for _, raw := range items {
+		env, status, code := checkEnvelope(raw, pairID, dir)
+		if code != "" {
+			refuse(w, status, code)
 			return
 		}
+		envs = append(envs, env)
+	}
+	// The relay measures the array of envelopes, even for a lone one.
+	if len(mustJSON(envs)) > maxEnvelope {
+		refuse(w, http.StatusRequestEntityTooLarge, "batch_too_large")
+		return
 	}
 	key := pairID + "/" + string(dir)
 	f.mu.Lock()
@@ -551,11 +621,11 @@ func (f *Fake) upload(w http.ResponseWriter, who authed, pairID string, body []b
 	}()
 	if full {
 		w.Header().Set("Retry-After", "1")
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "mailbox_full"})
+		refuse(w, http.StatusTooManyRequests, "mailbox_full")
 		return
 	}
 	f.mu.Lock()
-	numeric := f.NumericCursors
+	stringCursors := f.StringCursors
 	accepted := make([]map[string]any, 0, len(envs))
 	duplicates := []string{}
 	for _, env := range envs {
@@ -564,14 +634,34 @@ func (f *Fake) upload(w http.ResponseWriter, who authed, pairID string, body []b
 			duplicates = append(duplicates, env.ID)
 			continue
 		}
-		var c any = strconv.FormatInt(cursor, 10)
-		if numeric {
-			c = cursor
+		var c any = cursor
+		if stringCursors {
+			c = strconv.FormatInt(cursor, 10)
 		}
 		accepted = append(accepted, map[string]any{"id": env.ID, "cursor": c, "ttlSec": env.TTLSec})
 	}
 	f.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted, "duplicates": duplicates})
+}
+
+// unwrapBatch splits an upload body into its envelopes: one bare envelope,
+// or {"envelopes": [...]} with 1 to batchMax of them.
+func unwrapBatch(body []byte) (items []json.RawMessage, code string) {
+	if !json.Valid(body) {
+		// The relay's JSON parser answers this with its generic code.
+		return nil, "bad_request"
+	}
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(body, &probe) != nil || probe["envelopes"] == nil {
+		return []json.RawMessage{body}, ""
+	}
+	if json.Unmarshal(probe["envelopes"], &items) != nil || len(items) == 0 {
+		return nil, "invalid_batch"
+	}
+	if len(items) > batchMax {
+		return nil, "too_many_envelopes"
+	}
+	return items, ""
 }
 
 func (f *Fake) ack(w http.ResponseWriter, who authed, pairID string, body []byte) {
@@ -587,7 +677,7 @@ func (f *Fake) ack(w http.ResponseWriter, who authed, pairID string, body []byte
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if dec.Decode(&req) != nil || req.Cursor == nil || *req.Cursor < 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_body"})
+		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
 	cursor := *req.Cursor
@@ -619,7 +709,14 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID
 	if !ok {
 		return
 	}
-	last, _ := strconv.ParseInt(r.Header.Get("Last-Event-ID"), 10, 64)
+	var last int64
+	if ids := r.Header.Values("Last-Event-ID"); len(ids) > 0 {
+		if !lastIDPattern.MatchString(ids[0]) {
+			refuse(w, http.StatusBadRequest, "invalid_last_event_id")
+			return
+		}
+		last, _ = strconv.ParseInt(ids[0], 10, 64)
+	}
 	inbound := outbound(role).Opposite()
 	f.mu.Lock()
 	f.lastIDs = append(f.lastIDs, r.Header.Get("Last-Event-ID"))
@@ -667,7 +764,7 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID
 		}
 		f.mu.Unlock()
 		if revoked {
-			write(fmt.Sprintf("id: %d\nevent: revoked\ndata: {}\n\n", last))
+			write(fmt.Sprintf("id: %d\nevent: revoked\ndata: %s\n\n", last, mustJSON(map[string]string{"pairId": pairID})))
 			return
 		}
 		state := "idle"
@@ -677,7 +774,7 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID
 		if state != peerState {
 			peerState = state
 			data := mustJSON(map[string]any{"peer": peer, "state": state, "at": f.Now().Unix()})
-			if !write("event: presence\ndata: " + string(data) + "\n\n") {
+			if !write(fmt.Sprintf("id: %d\nevent: presence\ndata: %s\n\n", last, data)) {
 				return
 			}
 		}

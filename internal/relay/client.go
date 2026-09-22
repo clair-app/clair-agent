@@ -1,5 +1,6 @@
 // Package relay is the agent's client for the relay (RELAY.md §7, as pinned
-// by the relay's own plan): Ed25519-signed requests, SSE down and POST up,
+// by the relay's OpenAPI document, testdata/openapi.json, which
+// TestContract checks): Ed25519-signed requests, SSE down and POST up,
 // bounded streams resumed by cursor, and typed answers. It carries envelopes
 // and never looks inside them.
 package relay
@@ -501,12 +502,12 @@ func (c *Client) MintPairing(ctx context.Context) (Pairing, error) {
 }
 
 // CompletePairing is the phone's side of §6 (POST /v1/pairings/{id}/complete):
-// its X25519 public key, its push token and the sealed `hello`. The agent
-// never calls it; tools/phonesim and tests do.
+// its X25519 public key, its push token (optional: empty sends none) and the
+// sealed `hello`. The agent never calls it; tools/phonesim and tests do.
 func (c *Client) CompletePairing(ctx context.Context, pairingID string, phonePub []byte, pushToken string, hello envelope.Envelope) (string, error) {
 	body, err := json.Marshal(struct {
 		PhonePub  string            `json:"phonePub"`
-		PushToken string            `json:"pushToken"`
+		PushToken string            `json:"pushToken,omitempty"`
 		Envelope  envelope.Envelope `json:"envelope"`
 	}{base64.RawURLEncoding.EncodeToString(phonePub), pushToken, hello})
 	if err != nil {

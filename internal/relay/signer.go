@@ -13,7 +13,7 @@ import (
 const authScheme = "Clair-Ed25519"
 
 // Signer signs requests as one Ed25519 identity (RELAY.md §7.3, with the
-// canonical string the relay's own plan pins).
+// canonical string the relay's OpenAPI document pins).
 type Signer struct {
 	priv ed25519.PrivateKey
 	key  string

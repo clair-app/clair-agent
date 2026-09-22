@@ -1,0 +1,1286 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "clair-relay",
+    "version": "1",
+    "summary": "The blind, end-to-end-encrypted relay between the Clair agent and the Clair phone app.",
+    "description": "Stores ciphertext envelopes in per-pair mailboxes, streams them to the receiver over SSE, and can read or forge nothing: the traffic keys come from a pairing secret the relay never sees.\n\n**Both ends speak SSE down and `POST` up.** Every error body is `{\"error\": \"<code>\", ...}`, and the status codes are part of the contract.\n\n**Requests are signed, not tokened.** Swagger UI cannot sign a request, so *Try it out* works only on the public routes; see the `ClairEd25519` scheme for the canonical string."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "The relay serving this document. The public one is https://relay.claircode.app; a pairing QR names the relay a host uses."
+    }
+  ],
+  "security": [
+    {
+      "ClairEd25519": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "pairings",
+      "description": "Pairing a phone with a host."
+    },
+    {
+      "name": "pairs",
+      "description": "The tunnel: envelopes up, SSE down, ack, revoke."
+    },
+    {
+      "name": "devices",
+      "description": "A device's own settings."
+    },
+    {
+      "name": "public",
+      "description": "Unauthenticated pages served on the relay domain."
+    },
+    {
+      "name": "internal",
+      "description": "Operator and platform endpoints."
+    }
+  ],
+  "paths": {
+    "/v1/pairings": {
+      "post": {
+        "tags": [
+          "pairings"
+        ],
+        "operationId": "mintPairing",
+        "summary": "Mint a pending pairing (host)",
+        "description": "The pairing expires after 10 min and can be completed once. The caller becomes a host. Limits: ≤ 3 pending and ≤ 10/h per host key, ≤ 30/h per IP.",
+        "responses": {
+          "201": {
+            "description": "Minted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MintedPairing"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "A limit was hit. `Retry-After` says when to try again. — `error`: `too_many_pending_pairings`, `rate_limited`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the limit may admit the request.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/pairings/{id}/complete": {
+      "post": {
+        "tags": [
+          "pairings"
+        ],
+        "operationId": "completePairing",
+        "summary": "Complete a pairing (phone)",
+        "description": "Stores the phone's X25519 key and its hello envelope (`dir: p2h`, `pair` = this pairing's id) for the host's `/wait`. The caller becomes a phone.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The pairing id from `POST /v1/pairings`.",
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompletePairingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Paired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletedPairing"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or its envelope did not validate. — `error`: `invalid_body`, `invalid_envelope`, `pair_mismatch`, `dir_mismatch`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pairing. — `error`: `pairing_not_found`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another phone completed it first. — `error`: `pairing_used`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The pairing expired. — `error`: `pairing_expired`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The envelope is over 4 MiB. — `error`: `envelope_too_large`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "A body that is not `application/json` cannot be verified against the signature. — `error`: `unsupported_media_type`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "A limit was hit. `Retry-After` says when to try again. — `error`: `too_many_pairs`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the limit may admit the request.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/pairings/{id}/wait": {
+      "get": {
+        "tags": [
+          "pairings"
+        ],
+        "operationId": "waitForPairing",
+        "summary": "Wait for the phone (host, SSE)",
+        "description": "Only the minting host may wait. Events: `pending` (`PendingEvent`) at once, then `completed` (`CompletedEvent`) or `expired` (`ExpiredEvent`), after which the stream ends. A host that reconnects after completion is served `completed` again until 15 min past expiry.\n\nEvery stream is bounded: it ends itself after `STREAM_MAX_SECONDS` (780 s on the public relay, under its 800 s function limit) with a final message carrying `retry: 1000` and `id:` set to the last delivered id. That is routine, not an error — reconnect with `Last-Event-ID`.\nA `: keepalive` comment arrives every `KEEPALIVE_SECONDS` (30 s by default).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The pairing id from `POST /v1/pairings`.",
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An event stream.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pairing, or not minted by the caller. — `error`: `pairing_not_found`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The pairing expired before the stream opened. — `error`: `pairing_expired`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/pairs/{pairId}": {
+      "delete": {
+        "tags": [
+          "pairs"
+        ],
+        "operationId": "revokePair",
+        "summary": "Revoke a pair (either side)",
+        "description": "Purges the pair's mailbox. The other side's next call answers `410 pair_revoked`, and its open stream ends with `revoked`.",
+        "parameters": [
+          {
+            "name": "pairId",
+            "in": "path",
+            "required": true,
+            "description": "The pair id, which is the id of the pairing that created it.",
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked."
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pair does not exist or the caller is neither side of it (existence is not disclosed). — `error`: `pair_not_found`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The pair was revoked by either side. Remove its keys and hooks. — `error`: `pair_revoked`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/pairs/{pairId}/envelopes": {
+      "post": {
+        "tags": [
+          "pairs"
+        ],
+        "operationId": "uploadEnvelopes",
+        "summary": "Upload envelopes (either side)",
+        "description": "One envelope, or `{\"envelopes\": [...]}` with up to 100. `dir` must be the caller's outbound direction and `pair` this pair; both are in the receiver's AAD. A re-sent `id` is reported under `duplicates` and stored once. Keep **one upload in flight per pair and direction**: await the receipt before the next `POST`.",
+        "parameters": [
+          {
+            "name": "pairId",
+            "in": "path",
+            "required": true,
+            "description": "The pair id, which is the id of the pairing that created it.",
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Envelope"
+                  },
+                  {
+                    "$ref": "#/components/schemas/EnvelopeBatch"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An envelope or the batch did not validate. — `error`: `invalid_envelope`, `invalid_batch`, `too_many_envelopes`, `pair_mismatch`, `dir_mismatch`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pair does not exist or the caller is neither side of it (existence is not disclosed). — `error`: `pair_not_found`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The pair was revoked by either side. Remove its keys and hooks. — `error`: `pair_revoked`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "An envelope or the batch is over 4 MiB of JSON. — `error`: `envelope_too_large`, `batch_too_large`, `payload_too_large`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "A body that is not `application/json` cannot be verified against the signature. — `error`: `unsupported_media_type`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "A limit was hit. `Retry-After` says when to try again. — `error`: `mailbox_full`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the limit may admit the request.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/pairs/{pairId}/ack": {
+      "post": {
+        "tags": [
+          "pairs"
+        ],
+        "operationId": "ackEnvelopes",
+        "summary": "Acknowledge inbound envelopes (either side)",
+        "description": "Deletes the caller's inbound rows up to and including `cursor`. Ack once the envelopes are applied, not when they arrive.",
+        "parameters": [
+          {
+            "name": "pairId",
+            "in": "path",
+            "required": true,
+            "description": "The pair id, which is the id of the pairing that created it.",
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Acknowledged."
+          },
+          "400": {
+            "description": "The body did not validate. — `error`: `invalid_body`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pair does not exist or the caller is neither side of it (existence is not disclosed). — `error`: `pair_not_found`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The pair was revoked by either side. Remove its keys and hooks. — `error`: `pair_revoked`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "A body that is not `application/json` cannot be verified against the signature. — `error`: `unsupported_media_type`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/pairs/{pairId}/events": {
+      "get": {
+        "tags": [
+          "pairs"
+        ],
+        "operationId": "streamEvents",
+        "summary": "The caller's inbound direction (either side, SSE)",
+        "description": "Events: `envelope` (`Envelope`, `id:` is its mailbox cursor), `presence` (`PresenceEvent`, on open and on every change), `revoked` (`RevokedEvent`, ends the stream). Opening the stream and every keepalive mark the caller present. Without `Last-Event-ID` the stream drains from the oldest un-acked row.\n\nEvery stream is bounded: it ends itself after `STREAM_MAX_SECONDS` (780 s on the public relay, under its 800 s function limit) with a final message carrying `retry: 1000` and `id:` set to the last delivered id. That is routine, not an error — reconnect with `Last-Event-ID`.\nA `: keepalive` comment arrives every `KEEPALIVE_SECONDS` (30 s by default).",
+        "parameters": [
+          {
+            "name": "pairId",
+            "in": "path",
+            "required": true,
+            "description": "The pair id, which is the id of the pairing that created it.",
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "description": "Resume after this cursor.",
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{1,15}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An event stream.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`Last-Event-ID` is not a cursor. — `error`: `invalid_last_event_id`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pair does not exist or the caller is neither side of it (existence is not disclosed). — `error`: `pair_not_found`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The pair was revoked by either side. Remove its keys and hooks. — `error`: `pair_revoked`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/devices/me/push-token": {
+      "put": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "putPushToken",
+        "summary": "Store the phone's FCM token (phone)",
+        "description": "Stored against the calling device, not a pair; the caller becomes a phone. Wake pushes arrive with phase 3.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Stored."
+          },
+          "400": {
+            "description": "The body did not validate. — `error`: `invalid_body`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "A body that is not `application/json` cannot be verified against the signature. — `error`: `unsupported_media_type`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/internal/sweep": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "operationId": "sweep",
+        "summary": "Expire and prune (Vercel Cron)",
+        "description": "Called every minute by Vercel Cron. Hygiene only: expiry is also enforced on every read and write.",
+        "security": [
+          {
+            "CronBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Swept.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SweepReport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "healthz",
+        "summary": "Liveness",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Alive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/p": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "installPage",
+        "summary": "The pairing QR's target",
+        "description": "An install page for a phone without the app. The QR payload rides in the URL fragment and never reaches the relay.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "HTML.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/assetlinks.json": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "assetLinks",
+        "summary": "Android App Links statement",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The statement list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/install.sh": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "installScript",
+        "summary": "Redirect to the agent installer",
+        "security": [],
+        "responses": {
+          "302": {
+            "description": "To the agent repository's installer."
+          },
+          "404": {
+            "description": "No installer is configured."
+          }
+        }
+      }
+    },
+    "/robots.txt": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "robots",
+        "summary": "Disallow everything",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "text/plain.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "openApi",
+        "summary": "This document",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "docs",
+        "summary": "This document, in Swagger UI",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "HTML.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ClairEd25519": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization",
+        "description": "Every device request is signed with its Ed25519 key; there are no tokens and no sign-up. A device is registered by its first valid request.\n\n```text\nAuthorization: Clair-Ed25519 key=<b64url authPub>, ts=<unix seconds>, sig=<b64url signature>\nsig = Ed25519( METHOD \\n path-with-query \\n ts \\n sha256hex(body) )\n```\n\n`METHOD` upper-case; the path is the request target exactly as sent, query included; `sha256hex` is lowercase hex over the raw body bytes (an empty body hashes the empty string). `key` and `sig` are base64url without padding. `ts` must be within ±5 min of the relay's clock. The SSE `GET`s are signed the same way."
+      },
+      "CronBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "`CRON_SECRET`, sent by Vercel Cron."
+      }
+    },
+    "schemas": {
+      "Id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{22}$",
+        "description": "16 random bytes, base64url without padding."
+      },
+      "Envelope": {
+        "type": "object",
+        "properties": {
+          "v": {
+            "type": "number",
+            "const": 1
+          },
+          "pair": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{22}$"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "dir": {
+            "type": "string",
+            "enum": [
+              "h2p",
+              "p2h"
+            ]
+          },
+          "wake": {
+            "type": "string",
+            "enum": [
+              "now",
+              "soon",
+              "no"
+            ]
+          },
+          "ttlSec": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "ct": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{54,}$"
+          }
+        },
+        "required": [
+          "v",
+          "pair",
+          "id",
+          "dir",
+          "wake",
+          "ttlSec",
+          "ct"
+        ],
+        "additionalProperties": false,
+        "description": "The relay's view of an envelope. `ct` is opaque ciphertext; `pair`, `id`, `dir` and `wake` are in its AAD and relayed untouched. `ttlSec` is clamped to 86400 s for `now` and `soon` and 3600 s for `no`."
+      },
+      "EnvelopeBatch": {
+        "type": "object",
+        "properties": {
+          "envelopes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Envelope"
+            }
+          }
+        },
+        "required": [
+          "envelopes"
+        ],
+        "additionalProperties": false
+      },
+      "UploadReceipt": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "cursor": {
+                  "type": "integer"
+                },
+                "ttlSec": {
+                  "type": "integer",
+                  "description": "After clamping."
+                }
+              },
+              "required": [
+                "id",
+                "cursor",
+                "ttlSec"
+              ]
+            }
+          },
+          "duplicates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids already in the mailbox; not stored again."
+          }
+        },
+        "required": [
+          "accepted",
+          "duplicates"
+        ]
+      },
+      "AckRequest": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "cursor"
+        ],
+        "additionalProperties": false
+      },
+      "PushTokenRequest": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "additionalProperties": false
+      },
+      "CompletePairingRequest": {
+        "type": "object",
+        "properties": {
+          "phonePub": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          },
+          "pushToken": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "envelope": {
+            "$ref": "#/components/schemas/Envelope"
+          }
+        },
+        "required": [
+          "phonePub",
+          "envelope"
+        ],
+        "additionalProperties": false
+      },
+      "MintedPairing": {
+        "type": "object",
+        "properties": {
+          "pairingId": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "pairingId",
+          "expiresAt"
+        ]
+      },
+      "CompletedPairing": {
+        "type": "object",
+        "properties": {
+          "pairId": {
+            "$ref": "#/components/schemas/Id"
+          }
+        },
+        "required": [
+          "pairId"
+        ]
+      },
+      "PendingEvent": {
+        "description": "`event: pending`, `id: 0`.",
+        "type": "object",
+        "properties": {
+          "pairingId": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "pairingId",
+          "expiresAt"
+        ]
+      },
+      "CompletedEvent": {
+        "description": "`event: completed`, `id: 1`. The phone's hello.",
+        "type": "object",
+        "properties": {
+          "pairId": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "phonePub": {
+            "type": "string"
+          },
+          "envelope": {
+            "$ref": "#/components/schemas/Envelope"
+          }
+        },
+        "required": [
+          "pairId",
+          "phonePub",
+          "envelope"
+        ]
+      },
+      "ExpiredEvent": {
+        "description": "`event: expired`, `id: 1`.",
+        "type": "object",
+        "properties": {
+          "pairingId": {
+            "$ref": "#/components/schemas/Id"
+          }
+        },
+        "required": [
+          "pairingId"
+        ]
+      },
+      "PresenceEvent": {
+        "description": "`event: presence`, `id:` the current cursor.",
+        "type": "object",
+        "properties": {
+          "peer": {
+            "enum": [
+              "host",
+              "phone"
+            ]
+          },
+          "state": {
+            "enum": [
+              "connected",
+              "idle"
+            ]
+          },
+          "at": {
+            "type": "integer",
+            "description": "Unix seconds."
+          }
+        },
+        "required": [
+          "peer",
+          "state",
+          "at"
+        ]
+      },
+      "RevokedEvent": {
+        "description": "`event: revoked`, `id:` the current cursor. Ends the stream.",
+        "type": "object",
+        "properties": {
+          "pairId": {
+            "$ref": "#/components/schemas/Id"
+          }
+        },
+        "required": [
+          "pairId"
+        ]
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "service": {
+            "const": "clair-relay"
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The deployed commit, on Vercel."
+          },
+          "now": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "ok",
+          "service",
+          "commit",
+          "now"
+        ]
+      },
+      "SweepReport": {
+        "type": "object",
+        "properties": {
+          "mailboxExpired": {
+            "type": "integer"
+          },
+          "pairingsSwept": {
+            "type": "integer"
+          },
+          "tombstonesSwept": {
+            "type": "integer"
+          },
+          "heartbeatsCleared": {
+            "type": "integer"
+          },
+          "devicesSwept": {
+            "type": "integer"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "A stable code."
+          },
+          "issues": {
+            "type": "array",
+            "description": "On `invalid_body` and `invalid_envelope`.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "retryAfterSeconds": {
+            "type": "number",
+            "description": "On `429`."
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Unauthorized": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "const": "unauthorized"
+          },
+          "reason": {
+            "enum": [
+              "malformed",
+              "skew",
+              "signature"
+            ]
+          },
+          "serverTime": {
+            "type": "integer",
+            "description": "The relay's clock, unix seconds."
+          }
+        },
+        "required": [
+          "error",
+          "reason",
+          "serverTime"
+        ]
+      }
+    }
+  }
+}

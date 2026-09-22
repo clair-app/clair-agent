@@ -15,9 +15,12 @@ watch protocol, for vocabulary only — the agent never touches it), and `:share
 (the golden vectors, `RelayVectorsTest`, see "Vectors" below).
 
 The relay is `clair-server` (a sibling checkout at `../clair-server`, NestJS on
-Vercel). **Where its plan and RELAY.md disagree, the relay's pins win** and are listed under
-"Divergences" here; the wire contract this code speaks is section E of the implementation
-plan, reproduced in `internal/relay`'s doc comments.
+Vercel). **Where the relay and RELAY.md disagree, the relay wins** and the difference is listed under
+"Divergences" here. The wire contract this code speaks is the relay's **OpenAPI document**
+(`openapi.json` at the root of `clair-server`, served at `/openapi.json`, browsable at
+`/docs`). It is the source of truth for routes, status codes, `error` codes, body and SSE
+event schemas, and the `Clair-Ed25519` canonical string; RELAY.md still owns the crypto and
+the behaviour. See "Relay contract" below.
 
 ## The posture
 
@@ -109,6 +112,24 @@ header, `nonce`, exact `recordBytes`, `aad` and `ct`, all base64url) is shared w
 so a vector that fails is a bug in one of the two implementations, never a fixture to edit.
 The crypto is independently pinned by RFC 5869 A.1 and draft-irtf-cfrg-xchacha A.3.1 through
 our layout, plus an independent HKDF in the tests.
+
+## Relay contract
+
+`internal/relay/testdata/openapi.json` is the relay's `openapi.json`, copied unchanged; the
+comment beside `specPath` in `internal/relay/contract_test.go` names the `clair-server`
+commit it was taken from, and a refresh updates both. `TestContract` drives the real client
+(and raw signed requests for the refusals the client never provokes) through
+`relaytest.Fake`, records every exchange and checks it against the document: route and
+method, declared status, an `error` code the response lists, JSON and SSE event schemas,
+and the request body of every 2xx. Every `pairings` and `pairs` operation must be
+exercised, so a route the relay adds fails the test until it is covered. Like a vector, the
+copy is never edited to make a check pass: a failure is drift in the client or the fake, or
+a relay change to follow.
+
+The validator is a standard-library subset of JSON Schema (ADR 2026-09.vnj9), not a
+library. A schema that uses a keyword it does not know fails loudly instead of passing. No
+code is generated from the document: the client is small, streams SSE, signs raw body bytes,
+and depguard's allow-list (ADR 2026-09.kau2) has no room for a generator's runtime.
 
 ## Numbers that are *draft*
 
