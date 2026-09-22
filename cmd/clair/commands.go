@@ -257,6 +257,11 @@ func cmdStatus(ctx context.Context, d deps, args []string, stdout, stderr io.Wri
 // printStatus renders ctl.Status for a person.
 func printStatus(w io.Writer, st ctl.Status) {
 	fmt.Fprintf(w, "clair %s — listening on %s, relay %s, up %s\n", st.Version, st.Listen, st.Relay, (time.Duration(st.UptimeSec) * time.Second).String())
+	if st.Presence != nil {
+		fmt.Fprintf(w, "terminal input: idle %s (%s)\n", (time.Duration(st.Presence.IdleMs) * time.Millisecond).Round(time.Second), st.Presence.Source)
+	} else {
+		fmt.Fprintln(w, "terminal input: no signal — subagent prompts are never handed to the terminal")
+	}
 	if !st.Paired {
 		if st.Unpaired != "" {
 			fmt.Fprintf(w, "not paired (%s) — run `clair pair`\n", st.Unpaired)
@@ -274,6 +279,11 @@ func printStatus(w io.Writer, st ctl.Status) {
 		}
 		fmt.Fprintf(w, "  phone: %s   queue: %d records (%d bytes)   held decides: %d\n", phone, p.QueueRecords, p.QueueBytes, p.Held)
 		fmt.Fprintf(w, "  uploader: %s%s   stream: %s%s   clock skew: %ds\n", p.Uploader.State, lastError(p.Uploader), p.Stream.State, lastError(p.Stream), p.SkewSec)
+		if p.IdleThresholdSec > 0 {
+			fmt.Fprintf(w, "  subagent prompts go to the terminal while input is under %ds idle\n", p.IdleThresholdSec)
+		} else {
+			fmt.Fprintln(w, "  subagent prompts are always held for the phone")
+		}
 	}
 }
 

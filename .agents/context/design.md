@@ -2,7 +2,8 @@
 
 **The design is not in this repository.** It is `docs/RELAY.md` in the `clair` repository
 (the phone/watch app) — normally a sibling checkout at `../clair`, i.e.
-`../clair/docs/RELAY.md` (revision 2026-09-21). Read it before any design-level work;
+`../clair/docs/RELAY.md` (revision 2026-09-22 **r3**: r2 folded in this implementation's
+corrections, r3 the presence rule — its "Revision 2" and "Revision 3" lists are the diff). Read it before any design-level work;
 this page is the map from its sections to this codebase, not a copy. If the sibling checkout
 is missing, ask for it rather than working from memory: the document is revisioned and the
 numbers marked *draft* move.
@@ -24,9 +25,10 @@ plan, reproduced in `internal/relay`'s doc comments.
   RELAY.md, not the phone's Kotlin: both sides reproduce the same vectors from the same
   document and share no code. A disagreement with the phone is settled by the document,
   then by a vector test in both repositories.
-- It reads **one** plaintext field, `hook_event_name`, and only to pick `wake` (§4, §7.5).
-  The loopback server also checks that `session_id` is *present* (the phone's 400 rule)
-  and never reads it.
+- It reads **two** plaintext fields: `hook_event_name`, only to pick `wake` (§4, §7.5), and
+  `permission_mode`, only to tell a background subagent's decide, which is handed to the
+  terminal while someone is at one (§4.3, ADR 2026-09.34qh). The loopback server also checks
+  that `session_id` is *present* (the phone's 400 rule) and never reads it.
 - The relay (`clair-server`) never holds a traffic key and is trusted for nothing (§3,
   §10). Everything the agent sends it is ciphertext plus routing headers.
 
@@ -35,7 +37,8 @@ plan, reproduced in `internal/relay`'s doc comments.
 | RELAY.md | Package | What it owns |
 | --- | --- | --- |
 | §4, §4.1 | `internal/hookserver`, `internal/record` | Loopback listener on `127.0.0.1:7317` with `HookServer`'s bearer-and-path contract; tunnel records (`request` / `response` / `control`); `/hook/event`, `/statusline`, `/ping` answered `204` locally; `/hook/decide` held open until the response record or the deadline; `/status` answered locally |
-| §4.2 | `internal/tunnel` | One bounded FIFO per pair (draft 2 000 records / 16 MiB), shedding `no` first, then `soon`, never `now`; in memory; `reset` on start, `cancel` when Claude Code abandons a decide |
+| §4.2 | `internal/tunnel` | One bounded FIFO per pair (draft 2 000 records / 16 MiB), shedding `no` first, then `soon`, never `now`; in memory; `reset` on start, `cancel {reqId, reason}` when Claude Code abandons a decide (`client`), the terminal takes it (`terminal`) or the agent stops (`stop`) |
+| §4.3 | `internal/presence`, `internal/tunnel` | Terminal input idle from pty access times (`/dev/pts/*`, `/dev/ttys*`) or `GetLastInputInfo`; stamped as `X-Clair-Idle-Ms` on every request record; a `bubble` decide is released to the terminal at once while the idle is under the phone's threshold (`hello.presence` / `policy`, default 120 s, 0 = off), or when someone returns while it is held; flips while a decide is held go out as `/hook/presence` requests (`now`) |
 | §5.1 | `internal/identity`, `internal/state` | Host X25519 + Ed25519 seeds in `host.key` (0600) under `os.UserConfigDir()/clair` — `~/.config/clair` on Linux, `~/Library/Application Support/clair` on macOS, `%AppData%\clair` on Windows; `CLAIR_CONFIG_DIR` overrides |
 | §5.2–5.4 | `internal/envelope` | HKDF derivation with `salt = k`; the envelope (`v`, `pair`, `id`, `dir`, `wake`, `ttlSec`, `ct`); XChaCha20-Poly1305 with a 24-byte random nonce and the exact AAD layout; per-direction replay counters (`Counter`, `HighWater`); ULID ids; the 4 MiB cap and the derived 3 145 592-byte record cap |
 | §5.5 | `internal/envelope` | Standard-library `crypto/ecdh`, `crypto/hkdf`, `crypto/ed25519`; `golang.org/x/crypto/chacha20poly1305` is the only outside import (RELAY.md names `x/crypto/{curve25519,hkdf}`; the stdlib has both since Go 1.20/1.24) |
@@ -67,7 +70,14 @@ Deliberate, all recorded in ADRs:
 - **`clair statusline`** replaces the `sh clair-statusline.sh` shim (ADR 2026-09.evep).
 - **Config lives under `os.UserConfigDir()/clair`**, which is `~/.config/clair` on Linux only.
 
-## RELAY.md revision proposal (to carry into `clair/docs/RELAY.md` and the relay's `protocol.md`)
+## Revision 3 (2026-09-22): presence
+
+Folded into RELAY.md r3 §4.3 from NOTES.md's observation in the `clair` repository (ADR 2026-09.34qh
+here): the `X-Clair-Idle-Ms` header, `cancel.reason`, `hello.presence` / the `policy` control, and the
+`/hook/presence` request. The relay is untouched by it (ciphertext is ciphertext); the phone's
+`RelayIngress` and `HookServer` read the header and the new control when they are written.
+
+## Corrections this implementation made to RELAY.md (folded into r2; still to carry into the relay's `protocol.md`)
 
 - **G1** — the sender's `n` must survive restarts: block reservation, persisted before use
   (ADR 2026-09.hzwt). ADR ew4t's "neither end persists a counter" is about nonces.

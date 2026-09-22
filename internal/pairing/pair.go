@@ -201,6 +201,9 @@ func Pair(ctx context.Context, o Options) error {
 		P2HLast:   hello.N,
 		H2PNext:   2, // the hello-ack takes n=1
 	}
+	if hello.Presence != nil {
+		pair.IdleThresholdSec = hello.Presence.IdleThresholdSec
+	}
 	pair.SetKeys(keys)
 	if err := o.sendHelloAck(ctx, client, keys, completed.PairID); err != nil {
 		fmt.Fprintf(o.Stderr, "clair pair: the hello-ack did not reach the relay (%v); the daemon will send it.\n", err)

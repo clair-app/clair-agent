@@ -1,8 +1,8 @@
 // Package record is the plaintext inside an envelope (RELAY.md §4.1): the
 // tunnelled request, the phone's response, and the control records the two
 // ends exchange. The hook body travels as raw JSON, never re-encoded, and the
-// only field of it anyone here reads is `hook_event_name` — see [HookEventName]
-// and the blind-tunnel rule in .agents/rules/go.md.
+// only fields of it anyone here reads are the two in [Hook] — see the
+// blind-tunnel rule in .agents/rules/go.md and ADR 2026-09.34qh.
 package record
 
 import (
@@ -25,11 +25,45 @@ const (
 	PathStatusline = PathPrefix + "/statusline"
 	PathPing       = PathPrefix + "/ping"
 	PathStatus     = PathPrefix + "/status"
+	// PathPresence is a request the agent itself sends while it holds a
+	// decide: the host's terminal-input idle time changed (§4.3). Its body
+	// is `{"idleMs": <int>}`.
+	PathPresence = PathPrefix + "/hook/presence"
 	// TimeoutQuery is the decide endpoint's query parameter, in seconds.
 	TimeoutQuery = "timeout"
 	// HostHeader names the machine a hook came from; it is the one request
-	// header a request record carries.
+	// header the loopback forwards.
 	HostHeader = "X-Clair-Host"
+	// IdleHeader is stamped by the agent on every request record it sends
+	// when the host has a presence signal: milliseconds since a terminal of
+	// this user's last read input (§4.3).
+	IdleHeader = "X-Clair-Idle-Ms"
+)
+
+// Hook is what the loopback server learned from a hook body's top level, and
+// all the agent ever learns of one: the event name, for the wake hint (§7.5),
+// and the permission mode, for the release rule (§4.3).
+type Hook struct {
+	Event string
+	// Mode is `permission_mode`; ModeBubble marks a background subagent's
+	// prompt, which Claude Code shows in the terminal only once the hook
+	// returns without a decision.
+	Mode string
+}
+
+// ModeBubble is the permission mode of a bubbled prompt (an internal value
+// of Claude Code, observed on 2.1.278; NOTES.md in the phone repository).
+const ModeBubble = "bubble"
+
+// Why the agent cancels a held decide (the cancel record's `reason`).
+const (
+	// CancelClient: Claude Code closed the hook's socket.
+	CancelClient = "client"
+	// CancelTerminal: the prompt was handed to the terminal because someone
+	// is at it (§4.3).
+	CancelTerminal = "terminal"
+	// CancelStop: the agent is stopping; `reset` follows on the next start.
+	CancelStop = "stop"
 )
 
 // Kind discriminates the three record shapes.
@@ -59,9 +93,20 @@ const (
 	ControlReset Control = "reset"
 	// ControlRevoke ends the pair from the sender's side (§6.6).
 	ControlRevoke Control = "revoke"
-	// ControlCancel says Claude Code abandoned a held decide (gap G2).
+	// ControlCancel closes a held decide on the phone: Claude Code
+	// abandoned it, the terminal took it, or the agent is stopping (§4.1).
 	ControlCancel Control = "cancel"
+	// ControlPolicy carries the phone's settings for the host (§4.3).
+	ControlPolicy Control = "policy"
 )
+
+// Presence is the phone's presence policy, inside `hello` and `policy`.
+type Presence struct {
+	// IdleThresholdSec is the terminal idle time under which someone counts
+	// as present; nil leaves the agent's default, 0 switches the release
+	// rule off.
+	IdleThresholdSec *int `json:"idleThresholdSec,omitempty"`
+}
 
 // ControlWake is the wake hint stamped on every control record the agent
 // sends: none of them is a prompt, none is churn.
@@ -110,6 +155,9 @@ type Record struct {
 	Status int `json:"status,omitempty"`
 	// Control names a control record.
 	Control Control `json:"control,omitempty"`
+	// Reason says why a decide was cancelled (cancel): one of the Cancel*
+	// constants; absent means CancelClient.
+	Reason string `json:"reason,omitempty"`
 	// Body is the hook JSON of a request, or the hook output of a response,
 	// verbatim.
 	Body json.RawMessage `json:"body,omitempty"`
@@ -122,6 +170,8 @@ type Record struct {
 	Hostname string `json:"hostname,omitempty"`
 	// AgentVersion is the agent's version (hello-ack).
 	AgentVersion string `json:"agentVersion,omitempty"`
+	// Presence is the phone's presence policy (hello, policy).
+	Presence *Presence `json:"presence,omitempty"`
 }
 
 // Marshal encodes r without HTML escaping, so the bytes of Body survive:
@@ -178,7 +228,7 @@ func (r *Record) Validate() error {
 		}
 	case KindControl:
 		switch r.Control {
-		case ControlHello, ControlHelloAck, ControlSnippet, ControlReset, ControlRevoke:
+		case ControlHello, ControlHelloAck, ControlSnippet, ControlReset, ControlRevoke, ControlPolicy:
 		case ControlCancel:
 			if r.ReqID == "" {
 				return fmt.Errorf("%w: cancel without reqId", ErrInvalid)
@@ -192,9 +242,8 @@ func (r *Record) Validate() error {
 	return nil
 }
 
-// HookEventName returns the `hook_event_name` of a hook body. It is the one
-// plaintext field the agent reads (RELAY.md §4, §7.5) and the only one this
-// function decodes: it walks the top-level keys and skips every other value
+// HookEventName returns the `hook_event_name` of a hook body. It decodes
+// nothing else: it walks the top-level keys and skips every other value
 // without interpreting it, so a `hook_event_name` nested inside `tool_input`
 // never counts. The first occurrence wins.
 func HookEventName(body []byte) (string, error) {

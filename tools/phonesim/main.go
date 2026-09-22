@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"claircode.app/clair-agent/internal/envelope"
 	"claircode.app/clair-agent/internal/identity"
 	"claircode.app/clair-agent/internal/pairing"
+	"claircode.app/clair-agent/internal/presence"
 	"claircode.app/clair-agent/internal/record"
 	"claircode.app/clair-agent/internal/relay"
 )
@@ -46,12 +48,13 @@ func main() {
 
 // options are the flags.
 type options struct {
-	link         string
-	relayURL     string
-	name         string
-	answer       string
-	verbose      bool
-	revokeOnExit bool
+	link          string
+	relayURL      string
+	name          string
+	answer        string
+	verbose       bool
+	revokeOnExit  bool
+	idleThreshold int
 }
 
 func parse(args []string, stderr io.Writer) (options, error) {
@@ -63,6 +66,7 @@ func parse(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&o.answer, "answer", "allow", "how to answer decides: allow, deny or none")
 	fs.BoolVar(&o.verbose, "v", false, "print decrypted record bodies")
 	fs.BoolVar(&o.revokeOnExit, "revoke-on-exit", false, "revoke the pair at the relay when stopping")
+	fs.IntVar(&o.idleThreshold, "idle-threshold", -1, "presence threshold in seconds to send in hello (RELAY.md §4.3); 0 switches the terminal release off, -1 leaves the agent's default")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -153,7 +157,11 @@ func simulate(ctx context.Context, o options, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	hello, err := seal(record.Record{Kind: record.KindControl, Control: record.ControlHello, Name: o.name, Snippet: snip}, pairingID)
+	helloRec := record.Record{Kind: record.KindControl, Control: record.ControlHello, Name: o.name, Snippet: snip}
+	if o.idleThreshold >= 0 {
+		helloRec.Presence = &record.Presence{IdleThresholdSec: &o.idleThreshold}
+	}
+	hello, err := seal(helloRec, pairingID)
 	if err != nil {
 		return err
 	}
@@ -185,6 +193,12 @@ func simulate(ctx context.Context, o options, stdout io.Writer) error {
 		}
 		describe(stdout, rec, env, o.verbose)
 		if rec.Kind == record.KindRequest && rec.Path == record.PathDecide && o.answer != "none" {
+			// The phone's half of RELAY.md §4.3: a bubbled prompt with someone
+			// at the terminal is the host's to show; a cancel follows.
+			if leftToTerminal(rec, o.threshold()) {
+				fmt.Fprintln(stdout, "  → left to the terminal (bubbled, someone is there)")
+				return nil
+			}
 			output := allowOutput
 			if o.answer == "deny" {
 				output = denyOutput
@@ -213,6 +227,30 @@ func simulate(ctx context.Context, o options, stdout io.Writer) error {
 	return err
 }
 
+// threshold is the presence threshold this phone asked for, or the agent's default.
+func (o options) threshold() time.Duration {
+	if o.idleThreshold >= 0 {
+		return time.Duration(o.idleThreshold) * time.Second
+	}
+	return presence.DefaultThreshold
+}
+
+// leftToTerminal applies the release predicate the agent applies (§4.3), on
+// the same inputs: the hook's permission mode and the stamped idle time.
+func leftToTerminal(rec *record.Record, threshold time.Duration) bool {
+	var body struct {
+		PermissionMode string `json:"permission_mode"`
+	}
+	if json.Unmarshal(rec.Body, &body) != nil || body.PermissionMode != record.ModeBubble {
+		return false
+	}
+	ms, err := strconv.ParseInt(rec.Headers[record.IdleHeader], 10, 64)
+	if err != nil {
+		return false
+	}
+	return presence.Sample{Idle: time.Duration(ms) * time.Millisecond, Known: true}.Present(threshold)
+}
+
 // open validates, decrypts and replay-checks one host envelope.
 func open(traffic *envelope.Keys, high *envelope.HighWater, pairID string, env envelope.Envelope) (*record.Record, error) {
 	if err := env.Validate(pairID, envelope.DirH2P); err != nil {
@@ -237,8 +275,8 @@ func open(traffic *envelope.Keys, high *envelope.HighWater, pairID string, env e
 func describe(w io.Writer, rec *record.Record, env envelope.Envelope, verbose bool) {
 	switch rec.Kind {
 	case record.KindRequest:
-		fmt.Fprintf(w, "request n=%d wake=%s %s reqId=%s host=%s bytes=%d\n", rec.N, env.Wake, rec.Path, rec.ReqID, rec.Headers[record.HostHeader], len(rec.Body))
-		if verbose {
+		fmt.Fprintf(w, "request n=%d wake=%s %s reqId=%s host=%s idleMs=%s bytes=%d\n", rec.N, env.Wake, rec.Path, rec.ReqID, rec.Headers[record.HostHeader], orDash(rec.Headers[record.IdleHeader]), len(rec.Body))
+		if verbose || rec.Path == record.PathPresence {
 			fmt.Fprintf(w, "  %s\n", rec.Body)
 		}
 	case record.KindControl:
@@ -247,11 +285,19 @@ func describe(w io.Writer, rec *record.Record, env envelope.Envelope, verbose bo
 		case record.ControlHelloAck:
 			fmt.Fprintf(w, " from %s (agent %s)", rec.Hostname, rec.AgentVersion)
 		case record.ControlCancel:
-			fmt.Fprintf(w, " reqId=%s", rec.ReqID)
+			fmt.Fprintf(w, " reqId=%s reason=%s", rec.ReqID, orDash(rec.Reason))
 		default:
 		}
 		fmt.Fprintln(w)
 	default:
 		fmt.Fprintf(w, "%s n=%d\n", rec.Kind, rec.N)
 	}
+}
+
+// orDash shows an absent value as "-".
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }

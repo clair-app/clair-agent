@@ -25,13 +25,13 @@ const (
 )
 
 type enqueued struct {
-	rec   record.Record
-	event string
+	rec  record.Record
+	hook record.Hook
 }
 
 type held struct {
 	rec     record.Record
-	event   string
+	hook    record.Hook
 	timeout time.Duration
 }
 
@@ -43,16 +43,16 @@ type fakeSink struct {
 	answer   func(ctx context.Context) (record.Record, bool, error)
 }
 
-func (f *fakeSink) Enqueue(rec record.Record, event string) error {
+func (f *fakeSink) Enqueue(rec record.Record, hook record.Hook) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.enqueued = append(f.enqueued, enqueued{rec: rec, event: event})
+	f.enqueued = append(f.enqueued, enqueued{rec: rec, hook: hook})
 	return nil
 }
 
-func (f *fakeSink) Hold(ctx context.Context, rec record.Record, event string, timeout time.Duration) (record.Record, bool, error) {
+func (f *fakeSink) Hold(ctx context.Context, rec record.Record, hook record.Hook, timeout time.Duration) (record.Record, bool, error) {
 	f.mu.Lock()
-	f.holds = append(f.holds, held{rec: rec, event: event, timeout: timeout})
+	f.holds = append(f.holds, held{rec: rec, hook: hook, timeout: timeout})
 	answer := f.answer
 	f.mu.Unlock()
 	if answer == nil {
@@ -260,8 +260,8 @@ func TestRequestRecordShape(t *testing.T) {
 		t.Fatalf("enqueued %d records, want 1", len(sink.enqueued))
 	}
 	got := sink.enqueued[0]
-	if got.event != "PreToolUse" {
-		t.Errorf("hook event = %q, want PreToolUse", got.event)
+	if got.hook != (record.Hook{Event: "PreToolUse"}) {
+		t.Errorf("hook = %+v, want PreToolUse with no mode", got.hook)
 	}
 	if got.rec.Kind != record.KindRequest || got.rec.Path != record.PathEvent || !envelope.ValidID(got.rec.ReqID) {
 		t.Errorf("record = %+v, want a request for %s with a ULID reqId", got.rec, record.PathEvent)
@@ -376,7 +376,7 @@ func TestDecideAnswers(t *testing.T) {
 			t.Parallel()
 			sink := &fakeSink{answer: tt.answer}
 			s := newServer(t, sink, nil)
-			req := httptest.NewRequestWithContext(t.Context(), "POST", record.PathDecide+"?timeout=300", strings.NewReader(`{"session_id":"s","hook_event_name":"PermissionRequest"}`))
+			req := httptest.NewRequestWithContext(t.Context(), "POST", record.PathDecide+"?timeout=300", strings.NewReader(`{"session_id":"s","hook_event_name":"PermissionRequest","permission_mode":"bubble"}`))
 			req.Header.Set("Authorization", "Bearer "+token)
 			rec := &wroteRecorder{ResponseRecorder: httptest.NewRecorder()}
 			s.ServeHTTP(rec, req)
@@ -392,8 +392,8 @@ func TestDecideAnswers(t *testing.T) {
 			if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, tt.wantType) {
 				t.Errorf("Content-Type = %q, want prefix %q", got, tt.wantType)
 			}
-			if h := sink.holds[0]; h.event != "PermissionRequest" || h.timeout != 300*time.Second {
-				t.Errorf("held %+v, want PermissionRequest for 300s", h)
+			if h := sink.holds[0]; h.hook != (record.Hook{Event: "PermissionRequest", Mode: "bubble"}) || h.timeout != 300*time.Second {
+				t.Errorf("held %+v, want a bubbled PermissionRequest for 300s", h)
 			}
 		})
 	}

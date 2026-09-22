@@ -37,13 +37,16 @@ const (
 )
 
 // Wake is the hint for a request record (RELAY.md §7.5, ADR 029's tiers one
-// hop earlier). The path decides first: a decide is `now`, the statusline and
-// the installer's ping are `soon`. Then the event name: turn boundaries are
-// `soon`; tool churn is `no`, except that the PostToolUse which closes an
-// action answered in the terminal is `soon` while a decide is held.
+// hop earlier). The path decides first: a decide is `now`, and so is a
+// presence change — it is only sent while a decide is held, and it is the
+// moment a prompt delivered quietly must start to buzz (§4.3); the
+// statusline and the installer's ping are `soon`. Then the event name: turn
+// boundaries are `soon`; tool churn is `no`, except that the PostToolUse
+// which closes an action answered in the terminal is `soon` while a decide
+// is held.
 func Wake(path, hookEventName string, decideHeld bool) envelope.Wake {
 	switch path {
-	case PathDecide:
+	case PathDecide, PathPresence:
 		return envelope.WakeNow
 	case PathStatusline, PathPing:
 		return envelope.WakeSoon

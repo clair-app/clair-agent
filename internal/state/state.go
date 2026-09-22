@@ -92,6 +92,10 @@ type Pair struct {
 	// PendingHelloAck says `clair pair` could not upload the hello-ack; the
 	// daemon sends it first.
 	PendingHelloAck bool `json:"pendingHelloAck"`
+	// IdleThresholdSec is the phone's presence threshold (RELAY.md §4.3),
+	// from its hello and then its policy records; nil is the agent's default,
+	// 0 switches the release of bubbled decides off.
+	IdleThresholdSec *int `json:"idleThresholdSec,omitempty"`
 }
 
 // Keys decodes the pair's traffic keys.
@@ -364,6 +368,12 @@ func (d *Dir) SaveP2HLast(id string, n uint64) error {
 // ClearPendingHelloAck records that the hello-ack reached the relay.
 func (d *Dir) ClearPendingHelloAck(id string) error {
 	return d.updatePair(id, func(p *Pair) { p.PendingHelloAck = false })
+}
+
+// SetIdleThreshold records the phone's presence threshold; nil restores the
+// agent's default.
+func (d *Dir) SetIdleThreshold(id string, sec *int) error {
+	return d.updatePair(id, func(p *Pair) { p.IdleThresholdSec = sec })
 }
 
 func (d *Dir) updatePair(id string, fn func(*Pair)) error {

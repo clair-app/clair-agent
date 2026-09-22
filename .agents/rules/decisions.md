@@ -20,6 +20,7 @@ an explanation, that explanation belongs in the ADR.
 | `/clair/ctl`, the admin token, the hookserver guard order, or who writes a pair file | [ADR 2026-09.r7kd](../memory/decisions/2026-09-r7kd-the-control-surface-shares-the-loopback-listener-under-clair-ctl-with-its-own.md) |
 | `settings.json`, the hooks block, `statusLine`, or `internal/ojson` | [ADR 2026-09.evep](../memory/decisions/2026-09-evep-the-agent-edits-settings-json-through-an-order-preserving-json-object-and.md) |
 | what a phone snippet may install | [ADR 2026-09.3gre](../memory/decisions/2026-09-3gre-a-phone-snippet-may-only-shape-the-agent-s-own-http-hooks.md) |
+| `internal/presence`, a held decide's lifetime, `permission_mode`, `X-Clair-Idle-Ms`, or the idea of reading a third hook field | [ADR 2026-09.34qh](../memory/decisions/2026-09-34qh-the-agent-reads-terminal-input-idle-time-itself-and-releases-a-bubbled-decide.md) |
 
 Add a row when an ADR guards something a future edit is likely to touch; not every ADR
 needs one.

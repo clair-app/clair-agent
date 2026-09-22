@@ -233,6 +233,48 @@ func TestPairCountersPersist(t *testing.T) {
 	}
 }
 
+func TestPairIdleThreshold(t *testing.T) {
+	t.Parallel()
+
+	d := openDir(t)
+	p := samplePair("AAAAAAAAAAAAAAAAAAAAAA")
+	if err := d.SavePair(p); err != nil {
+		t.Fatalf("SavePair: %v", err)
+	}
+	// Absent means the agent's default, and the file does not mention it.
+	stored, _ := d.LoadPair(p.PairID)
+	if stored.IdleThresholdSec != nil {
+		t.Fatalf("IdleThresholdSec on a fresh pair = %d, want nil", *stored.IdleThresholdSec)
+	}
+	raw, _ := os.ReadFile(filepath.Join(d.Path(), "pairs", p.PairID+".json"))
+	if bytes.Contains(raw, []byte("idleThresholdSec")) {
+		t.Errorf("pair file mentions an absent threshold:\n%s", raw)
+	}
+	// Zero is a value of its own: the rule switched off.
+	zero := 0
+	if err := d.SetIdleThreshold(p.PairID, &zero); err != nil {
+		t.Fatalf("SetIdleThreshold(0): %v", err)
+	}
+	stored, _ = d.LoadPair(p.PairID)
+	if stored.IdleThresholdSec == nil || *stored.IdleThresholdSec != 0 {
+		t.Fatalf("IdleThresholdSec after 0 = %v, want 0", stored.IdleThresholdSec)
+	}
+	three := 300
+	if err := d.SetIdleThreshold(p.PairID, &three); err != nil {
+		t.Fatalf("SetIdleThreshold(300): %v", err)
+	}
+	stored, _ = d.LoadPair(p.PairID)
+	if stored.IdleThresholdSec == nil || *stored.IdleThresholdSec != 300 {
+		t.Fatalf("IdleThresholdSec after 300 = %v, want 300", stored.IdleThresholdSec)
+	}
+	if err := d.SetIdleThreshold(p.PairID, nil); err != nil {
+		t.Fatalf("SetIdleThreshold(nil): %v", err)
+	}
+	if stored, _ = d.LoadPair(p.PairID); stored.IdleThresholdSec != nil {
+		t.Errorf("IdleThresholdSec after nil = %d, want nil", *stored.IdleThresholdSec)
+	}
+}
+
 func TestWriteIsAtomicAndLeavesNoTempFiles(t *testing.T) {
 	t.Parallel()
 

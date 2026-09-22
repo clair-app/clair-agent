@@ -10,8 +10,12 @@ implementation of its "agent" half; the relay (`clair-server`) is separate.
 
 **Status:** the tunnel and pairing are implemented and proven end to end against an in-process
 fake relay and a fake phone (`internal/daemon/e2e_test.go`), and as real processes with
-`tools/relaysim` and `tools/phonesim`. Not yet: OS service installation, `install.sh`, releases —
-run `clair daemon` in a terminal for now — and the Android side of the relay.
+`tools/relaysim` and `tools/phonesim`. A background subagent's permission prompt — which Claude
+Code shows in the terminal only once the hook lets go — is handed to the terminal at once while
+someone is typing at one, and held for the watch otherwise (RELAY.md §4.3; the daemon reads
+terminal input idle the way `w` does, no helper, no extra hook). Not yet: OS service installation,
+`install.sh`, releases — run `clair daemon` in a terminal for now — and the Android side of the
+relay.
 
 ```text
 clair daemon      serve Claude Code's hooks on loopback and tunnel them to the phone

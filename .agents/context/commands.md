@@ -55,6 +55,7 @@ go run ./tools/relaysim -listen 127.0.0.1:3000            # the fake relay, on a
 go run ./cmd/clair daemon -relay http://127.0.0.1:3000     # in a second terminal
 go run ./cmd/clair pair -qr none                           # prints a link; leave it waiting
 go run ./tools/phonesim -v '<the link>'                    # the "phone": completes the pairing, answers decides
+go run ./tools/phonesim -idle-threshold 30 '<the link>'    # …asking for a 30 s presence threshold (0: never release to the terminal)
 go run ./cmd/clair status
 curl -X POST -H "Authorization: Bearer $(jq -r .token $CLAIR_CONFIG_DIR/agent.json)" \
   --data '{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}' \

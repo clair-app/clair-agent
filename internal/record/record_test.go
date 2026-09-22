@@ -134,6 +134,26 @@ func TestWireFormPerKind(t *testing.T) {
 			r:    Record{N: 9, Kind: KindControl, Control: ControlCancel, ReqID: reqID},
 			want: `{"n":9,"kind":"control","reqId":"` + reqID + `","control":"cancel"}`,
 		},
+		{
+			name: "cancel with a reason",
+			r:    Record{N: 9, Kind: KindControl, Control: ControlCancel, ReqID: reqID, Reason: CancelTerminal},
+			want: `{"n":9,"kind":"control","reqId":"` + reqID + `","control":"cancel","reason":"terminal"}`,
+		},
+		{
+			name: "hello with a presence policy",
+			r:    Record{N: 1, Kind: KindControl, Control: ControlHello, Name: "Pixel 9 Pro", Presence: &Presence{IdleThresholdSec: new(120)}},
+			want: `{"n":1,"kind":"control","control":"hello","name":"Pixel 9 Pro","presence":{"idleThresholdSec":120}}`,
+		},
+		{
+			name: "policy switching the rule off",
+			r:    Record{N: 4, Kind: KindControl, Control: ControlPolicy, Presence: &Presence{IdleThresholdSec: new(0)}},
+			want: `{"n":4,"kind":"control","control":"policy","presence":{"idleThresholdSec":0}}`,
+		},
+		{
+			name: "presence request",
+			r:    Record{N: 5, Kind: KindRequest, ReqID: reqID, Path: PathPresence, Headers: map[string]string{IdleHeader: "3400"}, Body: []byte(`{"idleMs":3400}`)},
+			want: `{"n":5,"kind":"request","reqId":"` + reqID + `","path":"/clair/v1/hook/presence","headers":{"X-Clair-Idle-Ms":"3400"},"body":{"idleMs":3400}}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -193,6 +213,8 @@ func TestValidate(t *testing.T) {
 		{name: "known control", r: Record{N: 1, Kind: KindControl, Control: ControlRevoke}},
 		{name: "cancel with reqId", r: Record{N: 1, Kind: KindControl, Control: ControlCancel, ReqID: reqID}},
 		{name: "cancel without reqId", r: Record{N: 1, Kind: KindControl, Control: ControlCancel}, want: ErrInvalid},
+		{name: "policy", r: Record{N: 1, Kind: KindControl, Control: ControlPolicy, Presence: &Presence{}}},
+		{name: "policy without a body", r: Record{N: 1, Kind: KindControl, Control: ControlPolicy}},
 		{name: "unknown control", r: Record{N: 1, Kind: KindControl, Control: "rekey"}, want: ErrInvalid},
 		{name: "unknown kind", r: Record{N: 1, Kind: "ping"}, want: ErrInvalid},
 	}

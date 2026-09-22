@@ -18,6 +18,8 @@ import (
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/hookserver"
 	"claircode.app/clair-agent/internal/hostname"
+	"claircode.app/clair-agent/internal/presence"
+	"claircode.app/clair-agent/internal/record"
 	"claircode.app/clair-agent/internal/relay"
 	"claircode.app/clair-agent/internal/state"
 	"claircode.app/clair-agent/internal/tunnel"
@@ -57,6 +59,9 @@ type Options struct {
 	// NewRelay overrides how relay clients are built.
 	NewRelay  NewRelay
 	Installer Installer
+	// Presence overrides the host's terminal-input sampler (RELAY.md §4.3);
+	// nil uses presence.Local.
+	Presence presence.Sampler
 	// Ready, when set, receives the bound address once the listener is up.
 	Ready chan<- string
 }
@@ -77,6 +82,9 @@ func Run(ctx context.Context, o Options) error {
 	if d.opts.NewRelay == nil {
 		d.opts.NewRelay = d.defaultRelay
 	}
+	if d.opts.Presence == nil {
+		d.opts.Presence = presence.Local()
+	}
 	d.startedAt = d.now()
 	d.hostname = hostname.Local()
 	listen := o.Listen
@@ -92,10 +100,11 @@ func Run(ctx context.Context, o Options) error {
 
 	d.tunnel = tunnel.New(tunnel.Options{
 		Counters: o.Dir,
-		Hooks:    tunnel.Hooks{OnSnippet: d.onSnippet, OnRevoked: d.onRevoked},
+		Hooks:    tunnel.Hooks{OnSnippet: d.onSnippet, OnRevoked: d.onRevoked, OnPolicy: d.onPolicy},
 		Logger:   d.log,
 		Now:      d.now,
 		Entropy:  o.Entropy,
+		Presence: d.opts.Presence,
 	})
 	srv, err := hookserver.New(hookserver.Options{
 		Token:      o.Agent.Token,
@@ -203,7 +212,7 @@ func (d *daemon) pairCount() int {
 // Status reports the daemon's state.
 func (d *daemon) Status(context.Context) ctl.Status {
 	pairs := d.tunnel.Snapshot()
-	return ctl.Status{
+	st := ctl.Status{
 		Version:   d.opts.Version,
 		Listen:    d.listen,
 		Relay:     d.opts.Agent.Relay,
@@ -212,6 +221,10 @@ func (d *daemon) Status(context.Context) ctl.Status {
 		Pairs:     pairs,
 		Unpaired:  d.tunnel.Unpaired(),
 	}
+	if s := d.opts.Presence.Sample(); s.Known {
+		st.Presence = &ctl.Presence{IdleMs: s.Idle.Milliseconds(), Source: s.Source}
+	}
+	return st
 }
 
 // Reload re-reads host.key and the pair files and makes the tunnel match.
@@ -249,6 +262,7 @@ func (d *daemon) Reload(context.Context) error {
 			PendingHelloAck: p.PendingHelloAck,
 			Hostname:        d.hostname,
 			AgentVersion:    d.opts.Version,
+			IdleThreshold:   idleThreshold(p.IdleThresholdSec),
 		})
 	}
 	d.setLoaded(configs)
@@ -292,6 +306,25 @@ func (d *daemon) ReleasePair(_ context.Context, pairID string) error {
 	}
 	d.log.Info("pair released", "pair", pairID)
 	return nil
+}
+
+// idleThreshold resolves a pair file's presence threshold: absent is the
+// agent's default, 0 is off.
+func idleThreshold(sec *int) time.Duration {
+	if sec == nil {
+		return presence.DefaultThreshold
+	}
+	return time.Duration(*sec) * time.Second
+}
+
+// onPolicy persists a policy record the tunnel already applied.
+func (d *daemon) onPolicy(pairID string, policy record.Presence) {
+	if policy.IdleThresholdSec == nil {
+		return
+	}
+	if err := d.opts.Dir.SetIdleThreshold(pairID, policy.IdleThresholdSec); err != nil {
+		d.log.Warn("policy not persisted", "pair", pairID, "error", err.Error())
+	}
 }
 
 // onSnippet installs a hooks block the phone sent.

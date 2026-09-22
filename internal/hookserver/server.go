@@ -3,7 +3,7 @@
 // (RELAY.md §4; the phone's bridge-ingress.md), plus the daemon's control
 // surface under /clair/ctl for the CLI. Every hook is handed to a Sink as a
 // request record; the server itself reads nothing of a hook but the two
-// fields the phone's 400 rule needs.
+// fields the phone's 400 rule needs and the permission mode (record.Hook).
 package hookserver
 
 import (
@@ -40,12 +40,12 @@ const (
 type Sink interface {
 	// Enqueue takes a fire-and-forget request (/hook/event, /statusline,
 	// /ping). It must not block on I/O: the hook is answered 204 regardless.
-	Enqueue(req record.Record, hookEvent string) error
+	Enqueue(req record.Record, hook record.Hook) error
 	// Hold takes a decide and waits for the phone's response record or the
 	// timeout. ok=false is "no decision" (204); err is set only when ctx
 	// ended — the client left or the server is shutting down — and nothing
 	// is written then.
-	Hold(ctx context.Context, req record.Record, hookEvent string, timeout time.Duration) (resp record.Record, ok bool, err error)
+	Hold(ctx context.Context, req record.Record, hook record.Hook, timeout time.Duration) (resp record.Record, ok bool, err error)
 }
 
 // Controller answers the control surface.
@@ -249,23 +249,26 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool)
 	return body, true
 }
 
-// hookFields are the two fields the phone's HookInput.parse requires. The
-// session id is checked for presence and never read: a hook without one is
-// refused here rather than tunnelled to a phone that would drop it anyway,
-// leaving a decide hanging for its whole timeout.
-type hookFields struct {
-	SessionID     string `json:"session_id"`
-	HookEventName string `json:"hook_event_name"`
+// topLevel holds the two fields the phone's HookInput.parse requires and the
+// one the release rule reads (record.Hook, ADR 2026-09.34qh). The session id
+// is checked for presence and never read: a hook without one is refused here
+// rather than tunnelled to a phone that would drop it anyway, leaving a
+// decide hanging for its whole timeout.
+type topLevel struct {
+	SessionID      string `json:"session_id"`
+	HookEventName  string `json:"hook_event_name"`
+	PermissionMode string `json:"permission_mode"`
 }
 
-// hookEvent validates a hook body and returns its event name, or answers 400.
-func hookEvent(w http.ResponseWriter, body []byte) (string, bool) {
-	var f hookFields
+// hookFields validates a hook body and returns what the agent may know of
+// it, or answers 400.
+func hookFields(w http.ResponseWriter, body []byte) (record.Hook, bool) {
+	var f topLevel
 	if err := json.Unmarshal(body, &f); err != nil || f.SessionID == "" || f.HookEventName == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		return "", false
+		return record.Hook{}, false
 	}
-	return f.HookEventName, true
+	return record.Hook{Event: f.HookEventName, Mode: f.PermissionMode}, true
 }
 
 // request builds the request record: the path, the query, the one forwarded
@@ -290,14 +293,14 @@ func (s *Server) request(r *http.Request, body []byte) (record.Record, error) {
 
 // enqueue builds and hands over a fire-and-forget record; the answer is 204
 // whatever happens to it, as on the phone.
-func (s *Server) enqueue(w http.ResponseWriter, r *http.Request, body []byte, hookEvent string) {
+func (s *Server) enqueue(w http.ResponseWriter, r *http.Request, body []byte, hook record.Hook) {
 	rec, err := s.request(r, body)
 	if err != nil {
 		s.log.Error("request id not minted", "path", r.URL.Path, "error", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if err := s.sink.Enqueue(rec, hookEvent); err != nil {
+	if err := s.sink.Enqueue(rec, hook); err != nil {
 		s.log.Warn("hook not queued", "path", r.URL.Path, "req_id", rec.ReqID, "bytes", len(body), "error", err.Error())
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -311,11 +314,11 @@ func (s *Server) event(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	hookEvent, ok := hookEvent(w, body)
+	hook, ok := hookFields(w, body)
 	if !ok {
 		return
 	}
-	s.enqueue(w, r, body, hookEvent)
+	s.enqueue(w, r, body, hook)
 }
 
 func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +329,7 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	hookEvent, ok := hookEvent(w, body)
+	hook, ok := hookFields(w, body)
 	if !ok {
 		return
 	}
@@ -337,7 +340,7 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	timeout := record.DecideTimeout(r.URL.Query())
-	resp, ok, err := s.sink.Hold(r.Context(), rec, hookEvent, timeout)
+	resp, ok, err := s.sink.Hold(r.Context(), rec, hook, timeout)
 	if err != nil {
 		// The client is gone or the server is stopping; there is nobody to
 		// answer. The sink has told the phone.
@@ -369,7 +372,7 @@ func (s *Server) statusline(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	s.enqueue(w, r, body, "")
+	s.enqueue(w, r, body, record.Hook{})
 }
 
 func (s *Server) ping(w http.ResponseWriter, r *http.Request) {
@@ -381,7 +384,7 @@ func (s *Server) ping(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The phone tolerates any body here; a ping is the installer saying hello.
-	s.enqueue(w, r, body, "")
+	s.enqueue(w, r, body, record.Hook{})
 }
 
 // status answers GET /clair/v1/status locally with the agent's own state

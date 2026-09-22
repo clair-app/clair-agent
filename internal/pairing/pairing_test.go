@@ -335,7 +335,8 @@ func (w *world) scan(t *testing.T, link string, wrongK bool, snippet json.RawMes
 	if err != nil {
 		t.Fatal(err)
 	}
-	hello := record.Record{N: 1, Kind: record.KindControl, Control: record.ControlHello, Name: "Pixel 9 Pro", Snippet: snippet}
+	threshold := 90
+	hello := record.Record{N: 1, Kind: record.KindControl, Control: record.ControlHello, Name: "Pixel 9 Pro", Snippet: snippet, Presence: &record.Presence{IdleThresholdSec: &threshold}}
 	plain, _ := record.Marshal(&hello)
 	id, _ := envelope.NewID(time.Now(), rand.Reader)
 	env, err := envelope.Seal(traffic.Key(envelope.DirP2H), envelope.Header{Pair: payload.PairingIDString(), ID: id, Dir: envelope.DirP2H, Wake: envelope.WakeSoon, TTLSec: 600}, plain, rand.Reader)
@@ -372,6 +373,9 @@ func TestPairHappyPath(t *testing.T) {
 	p := pairs[0]
 	if p.PairID != ph.pairID || p.PhoneName != "Pixel 9 Pro" || p.Relay != w.fake.URL || p.H2PNext != 2 || p.P2HLast != 1 || p.PendingHelloAck {
 		t.Errorf("pair file = %+v", p)
+	}
+	if p.IdleThresholdSec == nil || *p.IdleThresholdSec != 90 {
+		t.Errorf("pair file threshold = %v, want the hello's 90", p.IdleThresholdSec)
 	}
 	stored, err := p.Keys()
 	if err != nil || *stored != *ph.traffic {

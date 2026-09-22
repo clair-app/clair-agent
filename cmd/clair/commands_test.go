@@ -144,19 +144,26 @@ func TestPrintStatus(t *testing.T) {
 	t.Parallel()
 
 	var out bytes.Buffer
-	printStatus(&out, ctl.Status{Version: "v1", Listen: "127.0.0.1:7317", Relay: "https://r", UptimeSec: 3661, Paired: true, Pairs: []ctl.PairStatus{{
+	printStatus(&out, ctl.Status{Version: "v1", Listen: "127.0.0.1:7317", Relay: "https://r", UptimeSec: 3661, Paired: true, Presence: &ctl.Presence{IdleMs: 12345, Source: "pty"}, Pairs: []ctl.PairStatus{{
 		PhoneName: "Pixel", Fingerprint: "aaaa bbbb", Phone: "connected", PhoneSeenAt: time.Now(), QueueRecords: 2, QueueBytes: 300, Held: 1,
-		Uploader: ctl.Link{State: "backoff", LastError: "relay down"}, Stream: ctl.Link{State: "connected"}, SkewSec: -2,
+		Uploader: ctl.Link{State: "backoff", LastError: "relay down"}, Stream: ctl.Link{State: "connected"}, SkewSec: -2, IdleThresholdSec: 120,
 	}}})
 	got := out.String()
-	for _, want := range []string{"up 1h1m1s", `paired with "Pixel" (fingerprint aaaa bbbb)`, "phone: connected since", "queue: 2 records (300 bytes)", "held decides: 1", "uploader: backoff (relay down)", "stream: connected", "clock skew: -2s"} {
+	for _, want := range []string{"up 1h1m1s", "terminal input: idle 12s (pty)", `paired with "Pixel" (fingerprint aaaa bbbb)`, "phone: connected since", "queue: 2 records (300 bytes)", "held decides: 1", "uploader: backoff (relay down)", "stream: connected", "clock skew: -2s", "subagent prompts go to the terminal while input is under 120s idle"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("printStatus output lacks %q:\n%s", want, got)
 		}
 	}
 	out.Reset()
 	printStatus(&out, ctl.Status{Unpaired: "revoked by the phone"})
-	if !strings.Contains(out.String(), "not paired (revoked by the phone)") {
-		t.Errorf("unpaired output:\n%s", out.String())
+	for _, want := range []string{"terminal input: no signal", "not paired (revoked by the phone)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("unpaired output lacks %q:\n%s", want, out.String())
+		}
+	}
+	out.Reset()
+	printStatus(&out, ctl.Status{Paired: true, Pairs: []ctl.PairStatus{{PhoneName: "Pixel"}}})
+	if !strings.Contains(out.String(), "subagent prompts are always held for the phone") {
+		t.Errorf("rule-off output:\n%s", out.String())
 	}
 }

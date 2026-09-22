@@ -48,6 +48,15 @@ type Status struct {
 	Pairs     []PairStatus `json:"pairs"`
 	// Unpaired explains why there is no pair when there used to be one.
 	Unpaired string `json:"unpaired,omitempty"`
+	// Presence is the host's terminal-input reading at the time of the call
+	// (RELAY.md §4.3); nil when the host has no signal.
+	Presence *Presence `json:"presence,omitempty"`
+}
+
+// Presence is one reading of the host's terminal input idle.
+type Presence struct {
+	IdleMs int64  `json:"idleMs"`
+	Source string `json:"source"` // pty or console
 }
 
 // PairStatus is one loaded pair.
@@ -66,6 +75,9 @@ type PairStatus struct {
 	Stream       Link `json:"stream"`
 	// SkewSec is the clock correction learnt from the relay.
 	SkewSec int64 `json:"skewSec"`
+	// IdleThresholdSec is the phone's presence threshold; 0 means a bubbled
+	// decide is never released to the terminal.
+	IdleThresholdSec int64 `json:"idleThresholdSec"`
 }
 
 // Link is the state of one relay connection.

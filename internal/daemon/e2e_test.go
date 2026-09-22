@@ -19,6 +19,7 @@ import (
 	"claircode.app/clair-agent/internal/daemon"
 	"claircode.app/clair-agent/internal/envelope"
 	"claircode.app/clair-agent/internal/identity"
+	"claircode.app/clair-agent/internal/presence"
 	"claircode.app/clair-agent/internal/record"
 	"claircode.app/clair-agent/internal/relay"
 	"claircode.app/clair-agent/internal/relay/relaytest"
@@ -58,6 +59,14 @@ type phone struct {
 	n      uint64
 	mu     sync.Mutex
 	answer func(req *record.Record) *record.Record // nil → no answer
+	wakes  map[uint64]envelope.Wake                // by the record's n
+}
+
+// wakeOf is the hint the envelope carrying record n was stamped with.
+func (p *phone) wakeOf(n uint64) envelope.Wake {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.wakes[n]
 }
 
 func (p *phone) seal(rec record.Record) envelope.Envelope {
@@ -105,6 +114,7 @@ func (p *phone) run(ctx context.Context) error {
 		}
 		p.mu.Lock()
 		answer := p.answer
+		p.wakes[rec.N] = env.Wake
 		p.mu.Unlock()
 		if rec.Kind == record.KindRequest && rec.Path == record.PathDecide && answer != nil {
 			if resp := answer(rec); resp != nil {
@@ -129,14 +139,33 @@ func (p *phone) next(t *testing.T) *record.Record {
 }
 
 type world struct {
-	fake  *relaytest.Fake
-	dir   *state.Dir
-	agent state.Agent
-	phone *phone
-	inst  *installer
-	addr  string
-	done  chan error
-	stop  context.CancelFunc
+	fake    *relaytest.Fake
+	dir     *state.Dir
+	agent   state.Agent
+	phone   *phone
+	inst    *installer
+	sampler *sampler
+	addr    string
+	done    chan error
+	stop    context.CancelFunc
+}
+
+// sampler is the host's terminal-input reading, moved by the test.
+type sampler struct {
+	mu   sync.Mutex
+	idle time.Duration
+}
+
+func (s *sampler) Sample() presence.Sample {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return presence.Sample{Idle: s.idle, Known: true, Source: "fake"}
+}
+
+func (s *sampler) set(idle time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.idle = idle
 }
 
 // newWorld pairs a host and a phone by hand (the flow `clair pair` runs) and
@@ -184,8 +213,8 @@ func newWorld(t *testing.T) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &world{fake: fake, dir: dir, agent: agent, inst: &installer{}, done: make(chan error, 1)}
-	w.phone = &phone{t: t, keys: phoneSide, client: phoneClient, seen: make(chan *record.Record, 64)}
+	w := &world{fake: fake, dir: dir, agent: agent, inst: &installer{}, sampler: &sampler{idle: 5 * time.Second}, done: make(chan error, 1)}
+	w.phone = &phone{t: t, keys: phoneSide, client: phoneClient, seen: make(chan *record.Record, 64), wakes: make(map[uint64]envelope.Wake)}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	w.stop = cancel
@@ -201,7 +230,7 @@ func newWorld(t *testing.T) *world {
 	go func() {
 		w.done <- daemon.Run(ctx, daemon.Options{
 			Dir: dir, Agent: agent, Listen: "127.0.0.1:0", Version: "test",
-			Now: time.Now, Entropy: rand.Reader, Installer: w.inst, Ready: ready,
+			Now: time.Now, Entropy: rand.Reader, Installer: w.inst, Presence: w.sampler, Ready: ready,
 		})
 	}()
 	select {
@@ -236,6 +265,7 @@ func (w *world) hook(ctx context.Context, t *testing.T, path, body string) (int,
 const (
 	preToolUse = `{"session_id":"sess-1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls > out"}}`
 	permission = `{"session_id":"sess-1","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls > out"}}`
+	bubbled    = `{"session_id":"sess-1","hook_event_name":"PermissionRequest","permission_mode":"bubble","tool_name":"Bash","tool_input":{"command":"ls > out"}}`
 	allow      = `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
 )
 
@@ -296,8 +326,8 @@ func TestEndToEnd(t *testing.T) {
 	if code != http.StatusOK || string(body) != allow || !strings.HasPrefix(ctype, "application/json") {
 		t.Fatalf("decide = %d %q (%s), want 200 with the phone's output", code, body, ctype)
 	}
-	if rec := w.phone.next(t); rec.Path != record.PathDecide || rec.Query["timeout"] != "30" {
-		t.Fatalf("decide record = %+v", rec)
+	if rec := w.phone.next(t); rec.Path != record.PathDecide || rec.Query["timeout"] != "30" || rec.Headers[record.IdleHeader] != "5000" {
+		t.Fatalf("decide record = %+v, want it stamped with X-Clair-Idle-Ms 5000", rec)
 	}
 
 	// Claude Code abandons a decide: the phone is told to cancel it.
@@ -318,8 +348,8 @@ func TestEndToEnd(t *testing.T) {
 	if code := <-abandoned; code != 0 {
 		t.Errorf("abandoned decide returned %d, want the client to see its own cancellation", code)
 	}
-	if rec := w.phone.next(t); rec.Control != record.ControlCancel || rec.ReqID != held.ReqID {
-		t.Fatalf("after abandoning: %+v, want cancel for %s", rec, held.ReqID)
+	if rec := w.phone.next(t); rec.Control != record.ControlCancel || rec.ReqID != held.ReqID || rec.Reason != record.CancelClient {
+		t.Fatalf("after abandoning: %+v, want cancel (client) for %s", rec, held.ReqID)
 	}
 
 	// The phone sends a hooks snippet; the installer gets it.
@@ -379,6 +409,77 @@ func TestEndToEnd(t *testing.T) {
 	}
 }
 
+// TestBubbledDecideGoesToTheTerminalWhileSomeoneIsThere is RELAY.md §4.3
+// end to end: a background subagent's prompt is answered "no decision" at
+// once while the host's terminal input is fresh, so Claude Code draws its
+// dialog, and the phone is told; with nobody at a terminal the same prompt
+// is held for the watch.
+func TestBubbledDecideGoesToTheTerminalWhileSomeoneIsThere(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	ctx := t.Context()
+	w.phone.next(t) // hello-ack
+	w.phone.next(t) // reset
+	w.phone.mu.Lock()
+	w.phone.answer = func(req *record.Record) *record.Record {
+		return &record.Record{Kind: record.KindResponse, ReqID: req.ReqID, Status: 200, Body: json.RawMessage(allow)}
+	}
+	w.phone.mu.Unlock()
+
+	// Someone typed 5 s ago: released at once, whatever the phone would say.
+	start := time.Now()
+	code, body, _ := w.hook(ctx, t, record.PathDecide+"?timeout=600", bubbled)
+	if code != http.StatusNoContent || len(body) != 0 {
+		t.Fatalf("bubbled decide = %d %q, want 204 at once", code, body)
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Errorf("the bubbled decide took %v, want it released without a round trip", d)
+	}
+	req := w.phone.next(t)
+	if req.Path != record.PathDecide || req.Headers[record.IdleHeader] != "5000" || w.phone.wakeOf(req.N) != envelope.WakeSoon {
+		t.Fatalf("released decide = %+v (wake %s), want it stamped and sent as soon", req, w.phone.wakeOf(req.N))
+	}
+	if rec := w.phone.next(t); rec.Control != record.ControlCancel || rec.ReqID != req.ReqID || rec.Reason != record.CancelTerminal {
+		t.Fatalf("after the release: %+v, want cancel (terminal) for %s", rec, req.ReqID)
+	}
+	// Nobody there: held and answered from the phone, like any decide.
+	w.sampler.set(15 * time.Minute)
+	code, body, _ = w.hook(ctx, t, record.PathDecide+"?timeout=600", bubbled)
+	if code != http.StatusOK || string(body) != allow {
+		t.Fatalf("bubbled decide with nobody there = %d %q, want the phone's 200", code, body)
+	}
+	if req := w.phone.next(t); req.Path != record.PathDecide || req.Headers[record.IdleHeader] != "900000" || w.phone.wakeOf(req.N) != envelope.WakeNow {
+		t.Fatalf("held decide = %+v (wake %s), want it stamped and sent as now", req, w.phone.wakeOf(req.N))
+	}
+
+	// clair status shows the reading and the threshold in force.
+	statusReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+w.addr+record.PathStatus, http.NoBody)
+	statusReq.Header.Set("Authorization", "Bearer "+w.agent.Token)
+	resp, err := http.DefaultClient.Do(statusReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusBody, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	for _, want := range []string{`"presence":{"idleMs":900000,"source":"fake"}`, `"idleThresholdSec":120`} {
+		if !bytes.Contains(statusBody, []byte(want)) {
+			t.Errorf("status lacks %s: %s", want, statusBody)
+		}
+	}
+
+	// The phone moves the threshold; the daemon persists it and applies it.
+	threshold := 1200
+	w.phone.send(ctx, record.Record{Kind: record.KindControl, Control: record.ControlPolicy, Presence: &record.Presence{IdleThresholdSec: &threshold}})
+	waitFor(t, func() bool {
+		p, err := w.dir.LoadPair(pairID)
+		return err == nil && p.IdleThresholdSec != nil && *p.IdleThresholdSec == 1200
+	})
+	if code, _, _ := w.hook(ctx, t, record.PathDecide+"?timeout=600", bubbled); code != http.StatusNoContent {
+		t.Fatalf("bubbled decide under the new threshold = %d, want 204 (15 min idle is now present)", code)
+	}
+}
+
 func TestShutdownReleasesHeldDecides(t *testing.T) {
 	t.Parallel()
 
@@ -415,8 +516,8 @@ func TestShutdownReleasesHeldDecides(t *testing.T) {
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("shutdown took %v", d)
 	}
-	if rec := w.phone.next(t); rec.Control != record.ControlCancel {
-		t.Errorf("after shutdown the phone got %+v, want the cancel", rec)
+	if rec := w.phone.next(t); rec.Control != record.ControlCancel || rec.Reason != record.CancelStop {
+		t.Errorf("after shutdown the phone got %+v, want the cancel (stop)", rec)
 	}
 }
 

@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/envelope"
+	"claircode.app/clair-agent/internal/presence"
 	"claircode.app/clair-agent/internal/record"
 	"claircode.app/clair-agent/internal/relay"
 )
@@ -49,23 +51,77 @@ type pair struct {
 	phoneSeenAt time.Time
 	upLink      ctl.Link
 	streamLink  ctl.Link
+	// idleThreshold is the phone's presence threshold (§4.3), from the pair
+	// file and then from policy records.
+	idleThreshold time.Duration
 }
 
-// enqueue seals a request record for this pair and queues it; decideTimeout
-// is the held request's deadline (zero for fire-and-forget).
-func (p *pair) enqueue(req record.Record, hookEvent string, decideTimeout time.Duration) error {
+// enqueue seals a request record for this pair and queues it with the given
+// hint and lifetime.
+func (p *pair) enqueue(req record.Record, wake envelope.Wake, ttlSec int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.revoked {
 		return nil
 	}
-	wake := record.Wake(req.Path, hookEvent, len(p.holds) > 0)
-	it, err := p.sealLocked(req, wake, record.TTL(wake, decideTimeout))
+	it, err := p.sealLocked(req, wake, ttlSec)
 	if err != nil {
 		return err
 	}
 	p.pushLocked(it)
 	return nil
+}
+
+// enqueuePresence tells the phone the host's terminal input idle changed
+// while a decide is held (§4.3): a request the agent itself originates, with
+// the idle both as the header every request carries and as the body.
+func (p *pair) enqueuePresence(s presence.Sample) {
+	id, err := envelope.NewID(p.t.now(), p.t.opts.Entropy)
+	if err != nil {
+		p.t.log.Warn("presence not queued", "pair", p.cfg.ID, "error", err.Error())
+		return
+	}
+	ms := strconv.FormatInt(s.Idle.Milliseconds(), 10)
+	req := record.Record{
+		Kind:    record.KindRequest,
+		ReqID:   id,
+		Path:    record.PathPresence,
+		Headers: map[string]string{record.IdleHeader: ms},
+		Body:    json.RawMessage(`{"idleMs":` + ms + `}`),
+	}
+	wake := record.Wake(req.Path, "", true)
+	if err := p.enqueue(req, wake, record.TTL(wake, record.TTLSoon)); err != nil {
+		p.t.log.Warn("presence not queued", "pair", p.cfg.ID, "error", err.Error())
+	}
+}
+
+// holding reports whether a decide is waiting on this pair (the wake table's
+// "while a decide is held").
+func (p *pair) holding() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.holds) > 0
+}
+
+// threshold is the presence threshold in force for this pair.
+func (p *pair) threshold() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.idleThreshold
+}
+
+// setPolicy applies a policy record from the phone (§4.3).
+func (p *pair) setPolicy(policy record.Presence) {
+	p.mu.Lock()
+	if policy.IdleThresholdSec != nil {
+		p.idleThreshold = time.Duration(*policy.IdleThresholdSec) * time.Second
+	}
+	threshold := p.idleThreshold
+	p.mu.Unlock()
+	p.t.log.Info("policy received", "pair", p.cfg.ID, "idle_threshold_s", int64(threshold/time.Second))
+	if p.t.opts.Hooks.OnPolicy != nil {
+		p.t.wg.Go(func() { p.t.opts.Hooks.OnPolicy(p.cfg.ID, policy) })
+	}
 }
 
 // enqueueControl seals and queues a control record; it returns the envelope
@@ -446,6 +502,10 @@ func (p *pair) apply(rec *record.Record) {
 			}
 		case record.ControlRevoke:
 			p.revoke("revoked by the phone")
+		case record.ControlPolicy:
+			if rec.Presence != nil {
+				p.setPolicy(*rec.Presence)
+			}
 		default:
 			p.t.log.Debug("control ignored", "pair", p.cfg.ID, "control", string(rec.Control))
 		}
@@ -544,16 +604,17 @@ func (p *pair) status() ctl.PairStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return ctl.PairStatus{
-		PairID:       p.cfg.ID,
-		PhoneName:    p.cfg.PhoneName,
-		Fingerprint:  p.cfg.Keys.Fingerprint(),
-		Phone:        p.phone,
-		PhoneSeenAt:  p.phoneSeenAt,
-		QueueRecords: len(p.queue),
-		QueueBytes:   p.queueBytes,
-		Held:         len(p.holds),
-		Uploader:     p.upLink,
-		Stream:       p.streamLink,
-		SkewSec:      int64(p.cfg.Relay.Skew() / time.Second),
+		PairID:           p.cfg.ID,
+		PhoneName:        p.cfg.PhoneName,
+		Fingerprint:      p.cfg.Keys.Fingerprint(),
+		Phone:            p.phone,
+		PhoneSeenAt:      p.phoneSeenAt,
+		QueueRecords:     len(p.queue),
+		QueueBytes:       p.queueBytes,
+		Held:             len(p.holds),
+		Uploader:         p.upLink,
+		Stream:           p.streamLink,
+		SkewSec:          int64(p.cfg.Relay.Skew() / time.Second),
+		IdleThresholdSec: int64(p.idleThreshold / time.Second),
 	}
 }

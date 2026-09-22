@@ -214,12 +214,19 @@ type harness struct {
 	revoked  []string
 	snippets [][]byte
 	presence []bool
+	policies []record.Presence
 }
 
 func newHarness(t *testing.T, mod func(*PairConfig)) *harness {
 	t.Helper()
+	return newHarnessWith(t, nil, mod)
+}
+
+// newHarnessWith is newHarness with the tunnel's options adjusted first.
+func newHarnessWith(t *testing.T, opts func(*Options), mod func(*PairConfig)) *harness {
+	t.Helper()
 	h := &harness{relay: newFakeRelay(), counters: newFakeCounters(), phone: newPhone(t), done: make(chan error, 1)}
-	h.tun = New(Options{
+	options := Options{
 		Counters: h.counters,
 		Entropy:  &counting{},
 		Hooks: Hooks{
@@ -238,8 +245,17 @@ func newHarness(t *testing.T, mod func(*PairConfig)) *harness {
 				defer h.mu.Unlock()
 				h.presence = append(h.presence, connected)
 			},
+			OnPolicy: func(_ string, policy record.Presence) {
+				h.mu.Lock()
+				defer h.mu.Unlock()
+				h.policies = append(h.policies, policy)
+			},
 		},
-	})
+	}
+	if opts != nil {
+		opts(&options)
+	}
+	h.tun = New(options)
 	ctx, cancel := context.WithCancel(t.Context())
 	h.cancel = cancel
 	go func() { h.done <- h.tun.Run(ctx) }()
@@ -281,6 +297,9 @@ func hook(event string) record.Record {
 	return record.Record{Kind: record.KindRequest, ReqID: "01ARYZ6S41TSV4RRFFQ69G5F" + fmt.Sprintf("%02d", len(event)%100), Path: record.PathEvent, Body: json.RawMessage(`{"session_id":"s","hook_event_name":"` + event + `"}`)}
 }
 
+// event is the loopback's reading of a hook with the given name.
+func event(name string) record.Hook { return record.Hook{Event: name} }
+
 func decide(reqID string) record.Record {
 	return record.Record{Kind: record.KindRequest, ReqID: reqID, Path: record.PathDecide, Query: map[string]string{"timeout": "300"}, Body: json.RawMessage(`{"session_id":"s","hook_event_name":"PermissionRequest"}`)}
 }
@@ -317,7 +336,7 @@ func TestFIFOOrderWakesAndCounters(t *testing.T) {
 		h := newHarness(t, nil)
 		defer h.stop(t)
 		for _, ev := range []string{"SessionStart", "PreToolUse", "PostToolUse", "Stop"} {
-			if err := h.tun.Enqueue(hook(ev), ev); err != nil {
+			if err := h.tun.Enqueue(hook(ev), event(ev)); err != nil {
 				t.Fatalf("Enqueue(%s): %v", ev, err)
 			}
 		}
@@ -361,7 +380,7 @@ func TestSheddingOrder(t *testing.T) {
 		h.relay.setUploadErr(errors.New("relay down"), false)
 		h.tun.opts.MaxRecords = 3
 		p := h.tun.livePairs()[0]
-		hold := newHold()
+		hold := newHold(false)
 		wakes := func() []envelope.Wake {
 			p.mu.Lock()
 			defer p.mu.Unlock()
@@ -385,19 +404,19 @@ func TestSheddingOrder(t *testing.T) {
 		}
 		newDecide := func(id string) {
 			p.register(id, hold)
-			_ = p.enqueue(decide(id), "PermissionRequest", time.Second)
+			_ = p.enqueue(decide(id), envelope.WakeNow, record.TTL(envelope.WakeNow, time.Second))
 		}
-		_ = h.tun.Enqueue(hook("PreToolUse"), "PreToolUse")
-		_ = h.tun.Enqueue(hook("UserPromptSubmit"), "UserPromptSubmit")
+		_ = h.tun.Enqueue(hook("PreToolUse"), event("PreToolUse"))
+		_ = h.tun.Enqueue(hook("UserPromptSubmit"), event("UserPromptSubmit"))
 		newDecide("01ARYZ6S41TSV4RRFFQ69G5FA1")
 		want("three fit", envelope.WakeNo, envelope.WakeSoon, envelope.WakeNow)
-		_ = h.tun.Enqueue(hook("Stop"), "Stop")
+		_ = h.tun.Enqueue(hook("Stop"), event("Stop"))
 		want("a soon sheds the oldest no", envelope.WakeSoon, envelope.WakeNow, envelope.WakeSoon)
 		newDecide("01ARYZ6S41TSV4RRFFQ69G5FA2")
 		want("a now sheds the oldest soon", envelope.WakeNow, envelope.WakeSoon, envelope.WakeNow)
 		newDecide("01ARYZ6S41TSV4RRFFQ69G5FA3")
 		want("another now sheds the last soon", envelope.WakeNow, envelope.WakeNow, envelope.WakeNow)
-		_ = h.tun.Enqueue(hook("PreToolUse"), "PreToolUse")
+		_ = h.tun.Enqueue(hook("PreToolUse"), event("PreToolUse"))
 		want("a no with only nows queued is dropped", envelope.WakeNow, envelope.WakeNow, envelope.WakeNow)
 		newDecide("01ARYZ6S41TSV4RRFFQ69G5FA4")
 		want("a now is never dropped", envelope.WakeNow, envelope.WakeNow, envelope.WakeNow, envelope.WakeNow)
@@ -412,15 +431,15 @@ func TestPostToolUseIsSoonWhileADecideIsHeld(t *testing.T) {
 		var wg sync.WaitGroup
 		holdCtx, cancelHold := context.WithCancel(t.Context())
 		wg.Go(func() {
-			_, _, _ = h.tun.Hold(holdCtx, decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), "PermissionRequest", time.Hour)
+			_, _, _ = h.tun.Hold(holdCtx, decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), event("PermissionRequest"), time.Hour)
 		})
 		synctest.Wait()
-		_ = h.tun.Enqueue(hook("PostToolUse"), "PostToolUse")
+		_ = h.tun.Enqueue(hook("PostToolUse"), event("PostToolUse"))
 		synctest.Wait()
 		cancelHold()
 		wg.Wait()
 		synctest.Wait()
-		_ = h.tun.Enqueue(hook("PostToolUse"), "PostToolUse")
+		_ = h.tun.Enqueue(hook("PostToolUse"), event("PostToolUse"))
 		synctest.Wait()
 		envs := h.relay.uploaded()
 		// reset, decide, PostToolUse (held → soon), cancel, PostToolUse (no).
@@ -453,7 +472,7 @@ func TestHoldIsResolvedByTheResponse(t *testing.T) {
 		}
 		got := make(chan result, 1)
 		go func() {
-			resp, ok, err := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), "PermissionRequest", time.Hour)
+			resp, ok, err := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), event("PermissionRequest"), time.Hour)
 			got <- result{resp, ok, err}
 		}()
 		synctest.Wait()
@@ -501,7 +520,7 @@ func TestHoldExpiresAtTheDeadline(t *testing.T) {
 		h := newHarness(t, nil)
 		defer h.stop(t)
 		start := time.Now()
-		_, ok, err := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), "PermissionRequest", 5*time.Second)
+		_, ok, err := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), event("PermissionRequest"), 5*time.Second)
 		if err != nil || ok {
 			t.Fatalf("Hold = ok %v, err %v; want no decision", ok, err)
 		}
@@ -518,11 +537,11 @@ func TestOversizeRecordIsDroppedAndDecideAnswersAtOnce(t *testing.T) {
 		big := decide("01ARYZ6S41TSV4RRFFQ69G5FAV")
 		big.Body = json.RawMessage(`{"session_id":"s","hook_event_name":"PermissionRequest","pad":"` + string(bytes.Repeat([]byte("x"), envelope.MaxRecordBytes)) + `"}`)
 		start := time.Now()
-		_, ok, err := h.tun.Hold(t.Context(), big, "PermissionRequest", time.Hour)
+		_, ok, err := h.tun.Hold(t.Context(), big, event("PermissionRequest"), time.Hour)
 		if err != nil || ok || time.Since(start) != 0 {
 			t.Fatalf("Hold of an oversize decide = ok %v, err %v after %v; want no decision at once", ok, err, time.Since(start))
 		}
-		if err := h.tun.Enqueue(big, "PreToolUse"); err != nil {
+		if err := h.tun.Enqueue(big, event("PreToolUse")); err != nil {
 			t.Fatalf("Enqueue of an oversize event: %v, want it dropped quietly", err)
 		}
 		synctest.Wait()
@@ -539,10 +558,10 @@ func TestNoPair(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- tun.Run(ctx) }()
 		synctest.Wait()
-		if err := tun.Enqueue(hook("Stop"), "Stop"); !errors.Is(err, ErrNoPair) {
+		if err := tun.Enqueue(hook("Stop"), event("Stop")); !errors.Is(err, ErrNoPair) {
 			t.Errorf("Enqueue with no pair: err = %v, want ErrNoPair", err)
 		}
-		if _, ok, err := tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), "PermissionRequest", time.Hour); ok || err != nil {
+		if _, ok, err := tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), event("PermissionRequest"), time.Hour); ok || err != nil {
 			t.Errorf("Hold with no pair = ok %v, err %v; want no decision at once", ok, err)
 		}
 		cancel()
@@ -591,7 +610,7 @@ func TestUploadRetriesAfterAFailure(t *testing.T) {
 		h := newHarness(t, nil)
 		defer h.stop(t)
 		h.relay.setUploadErr(errors.New("relay down"), true)
-		_ = h.tun.Enqueue(hook("Stop"), "Stop")
+		_ = h.tun.Enqueue(hook("Stop"), event("Stop"))
 		synctest.Wait()
 		if st := h.tun.Snapshot(); st[0].Uploader.State != "backoff" || st[0].QueueRecords == 0 {
 			t.Fatalf("status after a failed upload = %+v, want backoff with a queue", st[0])
@@ -612,7 +631,7 @@ func TestRelayTooLargeDropsALoneEnvelope(t *testing.T) {
 		h := newHarness(t, nil)
 		defer h.stop(t)
 		h.relay.setUploadErr(fmt.Errorf("fake: %w", relay.ErrTooLarge), false)
-		_ = h.tun.Enqueue(hook("Stop"), "Stop")
+		_ = h.tun.Enqueue(hook("Stop"), event("Stop"))
 		synctest.Wait()
 		// A 413 is not retried: the queue empties by dropping.
 		if st := h.tun.Snapshot(); st[0].QueueRecords != 0 {
@@ -627,7 +646,7 @@ func TestRevokeReleasesHoldsAndNotifiesOnce(t *testing.T) {
 		defer h.stop(t)
 		got := make(chan bool, 1)
 		go func() {
-			_, ok, _ := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), "PermissionRequest", time.Hour)
+			_, ok, _ := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), event("PermissionRequest"), time.Hour)
 			got <- ok
 		}()
 		synctest.Wait()
@@ -650,7 +669,7 @@ func TestRevokeReleasesHoldsAndNotifiesOnce(t *testing.T) {
 		if st := h.tun.Snapshot(); len(st) != 0 || h.tun.Unpaired() == "" {
 			t.Errorf("after the revoke: %d pairs, unpaired %q", len(st), h.tun.Unpaired())
 		}
-		if err := h.tun.Enqueue(hook("Stop"), "Stop"); !errors.Is(err, ErrNoPair) {
+		if err := h.tun.Enqueue(hook("Stop"), event("Stop")); !errors.Is(err, ErrNoPair) {
 			t.Errorf("Enqueue after the revoke: %v, want ErrNoPair", err)
 		}
 	})
@@ -686,7 +705,7 @@ func TestSetPairsStartsAndStops(t *testing.T) {
 		}
 		got := make(chan bool, 1)
 		go func() {
-			_, ok, _ := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), "PermissionRequest", time.Hour)
+			_, ok, _ := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), event("PermissionRequest"), time.Hour)
 			got <- ok
 		}()
 		synctest.Wait()
@@ -722,7 +741,7 @@ func TestDrainReleasesHoldsAndFlushesQueues(t *testing.T) {
 		defer h.stop(t)
 		got := make(chan bool, 1)
 		go func() {
-			_, ok, _ := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), "PermissionRequest", time.Hour)
+			_, ok, _ := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), event("PermissionRequest"), time.Hour)
 			got <- ok
 		}()
 		synctest.Wait()

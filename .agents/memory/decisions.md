@@ -15,6 +15,7 @@ number" and all take it — so nobody picks one. Cite the id an ADR carries; nev
 
 | ADR | Decision | Topics |
 | --- | --- | --- |
+| [2026-09.34qh](decisions/2026-09-34qh-the-agent-reads-terminal-input-idle-time-itself-and-releases-a-bubbled-decide.md) | The agent reads terminal input idle time itself and releases a bubbled decide to the terminal while someone is at it | presence, hooks, tunnel |
 | [2026-09.3gre](decisions/2026-09-3gre-a-phone-snippet-may-only-shape-the-agent-s-own-http-hooks.md) | A phone snippet may only shape the agent's own http hooks | hooks, security |
 | [2026-09.evep](decisions/2026-09-evep-the-agent-edits-settings-json-through-an-order-preserving-json-object-and.md) | The agent edits settings.json through an order-preserving JSON object and installs clair statusline in place of the shell shim | hooks, claudecfg |
 | [2026-09.hzwt](decisions/2026-09-hzwt-the-replay-counter-survives-restarts-by-block-reservation.md) | The replay counter survives restarts by block reservation; the mailbox cursor is not persisted | protocol, state |
