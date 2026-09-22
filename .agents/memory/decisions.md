@@ -15,5 +15,11 @@ number" and all take it — so nobody picks one. Cite the id an ADR carries; nev
 
 | ADR | Decision | Topics |
 | --- | --- | --- |
+| [2026-09.3gre](decisions/2026-09-3gre-a-phone-snippet-may-only-shape-the-agent-s-own-http-hooks.md) | A phone snippet may only shape the agent's own http hooks | hooks, security |
+| [2026-09.evep](decisions/2026-09-evep-the-agent-edits-settings-json-through-an-order-preserving-json-object-and.md) | The agent edits settings.json through an order-preserving JSON object and installs clair statusline in place of the shell shim | hooks, claudecfg |
+| [2026-09.hzwt](decisions/2026-09-hzwt-the-replay-counter-survives-restarts-by-block-reservation.md) | The replay counter survives restarts by block reservation; the mailbox cursor is not persisted | protocol, state |
 | [2026-09.kau2](decisions/2026-09-kau2-static-analysis-is-one-pinned-golangci-lint-with-an-explicit-linter-set-and-a.md) | Static analysis is one pinned golangci-lint with an explicit linter set and a dependency allow-list | toolchain, lint, dependencies |
+| [2026-09.khcq](decisions/2026-09-khcq-the-agent-speaks-sse-down-and-post-up-only.md) | The agent speaks SSE down and POST up only; streams are bounded and resumed by cursor | relay, transport, protocol |
+| [2026-09.r7kd](decisions/2026-09-r7kd-the-control-surface-shares-the-loopback-listener-under-clair-ctl-with-its-own.md) | The control surface shares the loopback listener under /clair/ctl with its own token, and a pair file has one writer | daemon, state, cli |
 | [2026-09.vnj9](decisions/2026-09-vnj9-tests-are-the-standard-library-and-golden-vectors.md) | Tests are the standard library and golden vectors, not an assertion framework | testing, toolchain |
+| [2026-09.zhzc](decisions/2026-09-zhzc-the-qr-is-rendered-with-rsc-io-qr-and-drawn-in-half-blocks-by-the-agent.md) | The QR is rendered with rsc.io/qr and drawn in half-blocks by the agent | pairing, dependencies |

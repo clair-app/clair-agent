@@ -44,7 +44,17 @@ enabled or deprecated (the config is explicit, so nothing enables itself), commi
 
 ## Dependencies (`depguard`)
 
-`list-mode: strict` with `$gostd`, this module and `golang.org/x` allowed. To add one:
+`list-mode: strict` with `$gostd`, this module, `golang.org/x` and `rsc.io/qr` allowed.
+What is in `go.mod` and why:
+
+| Module | Used by | Why the standard library was not enough |
+| --- | --- | --- |
+| `golang.org/x/crypto` | `internal/envelope` (`chacha20poly1305.NewX`) | XChaCha20-Poly1305 is not in `crypto/*` (RELAY.md §5.3) |
+| `golang.org/x/term` | `internal/pairing` (`IsTerminal`) | telling a controlling terminal from a pipe |
+| `rsc.io/qr` | `internal/pairing` | no QR encoder in the standard library (ADR 2026-09.zhzc) |
+| `golang.org/x/sys` | indirect, via `x/crypto` | — |
+
+To add one:
 
 1. Be sure the standard library cannot do it (RELAY.md §5.5 is the posture: stdlib plus
    `x/crypto`, nothing shared with the relay).

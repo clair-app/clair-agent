@@ -92,7 +92,9 @@ linters:
     depguard:
       # A strict allow-list: a new dependency is a deliberate edit here, with the
       # reason in the commit (see .agents/rules/go.md). RELAY.md §5.5 names
-      # golang.org/x/crypto; the rest of x/ is the same stewardship.
+      # golang.org/x/crypto; the rest of x/ is the same stewardship. rsc.io/qr
+      # is the QR encoder behind `clair pair` (RELAY.md §6.1): the standard
+      # library has none, and the package is finished, dependency-free and BSD.
       rules:
         main:
           list-mode: strict
@@ -100,6 +102,7 @@ linters:
             - $gostd
             - claircode.app/clair-agent
             - golang.org/x
+            - rsc.io/qr
     errcheck:
       check-type-assertions: true
       # Writes to stdout/stderr and http.ResponseWriter: the idiom is to let
@@ -133,7 +136,9 @@ linters:
           strict: false
     misspell:
       locale: UK
-      ignore-rules: [analyze, analyzer, initialize, serialize, serialization, marshal, marshaling, unmarshal, unmarshaling, color]
+      # The last two are wire formats, not prose: the relay's 401 body says
+      # `"error":"unauthorized"` and Claude Code's hook output says `"behavior"`.
+      ignore-rules: [analyze, analyzer, initialize, serialize, serialization, marshal, marshaling, unmarshal, unmarshaling, color, unauthorized, behavior]
     nolintlint:
       require-explanation: true
       require-specific: true

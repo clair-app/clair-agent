@@ -13,9 +13,17 @@ ADR 2026-09.vnj9. These are the rules that follow from it.
   byte comparisons use `%x`. No assertion library.
 - **Golden vectors are files, not literals.** The relay vectors come from `:shared/relay`
   in the `clair` repository (`RelayVectorsTest`); copy the file into
-  `internal/<pkg>/testdata/` unchanged and record, in a comment beside the loader, the
-  clair commit it was taken from. Compare with `bytes.Equal`. A vector that "needs a small
-  fix" is a bug in one of the two implementations — find out which before touching it.
+  `internal/envelope/testdata/relay-vectors.json` unchanged and record, in the comment
+  beside the loader in `vectors_test.go`, the clair commit it was taken from. Until the
+  phone publishes it the test skips with a named reason. Compare with `bytes.Equal`. A
+  vector that "needs a small fix" is a bug in one of the two implementations — find out
+  which before touching it. Other goldens (RFC vectors, the QR renderings, the hooks block,
+  `settings.json` round trips) live in each package's `testdata/` the same way.
+- Codecs take their nonce and ids from an injected `io.Reader`, so a vector test can pin
+  every byte; `crypto/rand.Reader` is what production passes.
+- Concurrency tests use `testing/synctest` bubbles with in-memory fakes; nothing inside a
+  bubble touches the network (`internal/tunnel` is the pattern). The end-to-end test
+  (`internal/daemon/e2e_test.go`) runs in real time against `relaytest.Fake`.
 - Inject the clock and the entropy source as parameters (`mintID(now, entropy)` in
   `tools/adr` is the pattern); never monkey-patch a global.
 - The filesystem is `t.TempDir()`; the environment is `t.Setenv`; a test never writes

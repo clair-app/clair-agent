@@ -2,16 +2,21 @@
 
 **The design is not in this repository.** It is `docs/RELAY.md` in the `clair` repository
 (the phone/watch app) — normally a sibling checkout at `../clair`, i.e.
-`../clair/docs/RELAY.md`. Read it before any design-level work; this page is the map
-from its sections to this codebase, not a copy. If the sibling checkout is missing, ask
-for it rather than working from memory: the document is revisioned and the numbers marked
-*draft* move.
+`../clair/docs/RELAY.md` (revision 2026-09-21). Read it before any design-level work;
+this page is the map from its sections to this codebase, not a copy. If the sibling checkout
+is missing, ask for it rather than working from memory: the document is revisioned and the
+numbers marked *draft* move.
 
 Companions in that repository: ADR 2026-09.ew4t (the decision record for the relay),
 `.agents/context/bridge-ingress.md` (the five endpoints the agent tunnels, with their exact
 status codes, size cap and bearer contract), `.agents/context/protocol.md` (the phone ↔
 watch protocol, for vocabulary only — the agent never touches it), and `:shared/relay`
-(the golden vectors, `RelayVectorsTest`).
+(the golden vectors, `RelayVectorsTest` — **not written yet**, see "Vectors" below).
+
+The relay is `clair-server` (a sibling checkout at `../clair-server`, NestJS on
+Vercel). **Where its plan and RELAY.md disagree, the relay's pins win** and are listed under
+"Divergences" here; the wire contract this code speaks is section E of the implementation
+plan, reproduced in `internal/relay`'s doc comments.
 
 ## The posture
 
@@ -20,28 +25,82 @@ watch protocol, for vocabulary only — the agent never touches it), and `:share
   document and share no code. A disagreement with the phone is settled by the document,
   then by a vector test in both repositories.
 - It reads **one** plaintext field, `hook_event_name`, and only to pick `wake` (§4, §7.5).
-- The relay (`clair-relay`, NestJS, separate) never holds a traffic key and is trusted for
-  nothing (§3, §10). Everything the agent sends it is ciphertext plus routing headers.
+  The loopback server also checks that `session_id` is *present* (the phone's 400 rule)
+  and never reads it.
+- The relay (`clair-server`) never holds a traffic key and is trusted for nothing (§3,
+  §10). Everything the agent sends it is ciphertext plus routing headers.
 
-## Section → responsibility
+## Section → package
 
-| RELAY.md | What this codebase owns |
-| --- | --- |
-| §4, §4.1 | Loopback listener on `127.0.0.1:7317` with `HookServer`'s bearer-and-path contract; tunnel records (`request` / `response` / `control`); `/hook/event`, `/statusline`, `/ping` answered `204` locally; `/hook/decide` (and debug `/status`) held open until the response record or the deadline |
-| §4.2 | One bounded FIFO per pair (draft 2 000 records / 16 MiB), dropping `wake=no` first, then `soon`, never `now`; in memory; `reset` control record on start |
-| §5.1–5.4 | Host X25519 + Ed25519 keys (`~/.config/clair/`, `0600`); HKDF derivation with `salt = k`; the envelope (`v`, `pair`, `id`, `dir`, `wake`, `ttlSec`, `ct`); XChaCha20-Poly1305 with a 24-byte random nonce and the exact AAD layout; per-direction replay counter `n`; ULID `id`; 4 MiB cap |
-| §5.5 | `golang.org/x/crypto/{curve25519, chacha20poly1305, hkdf}` + `crypto/ed25519`; the Go vector suite reproducing `:shared/relay`'s file byte for byte |
-| §6 | `clair pair`: mint the pairing at the relay, render the QR (`/p#<fragment>`, ≈85 B, version-6 QR in half-blocks; `--qr=ascii`), wait, verify the phone's `hello` decrypts, confirm on `/dev/tty` when there is one, `hello-ack`, write `settings.json` + the statusline shim from the phone's `snippet` |
-| §6.5, §6.6 | The ~30-line `settings.json` merge (remove `/clair/v1/` entries, append, back up first); `clair unpair`; `410` handling |
-| §7.2, §7.3 | Relay client: WSS primary, SSE + `POST` fallback after a failed upgrade; Ed25519-signed requests (`Authorization: Clair-Ed25519 …`), ±5 min skew corrected from the relay's `Date` |
-| §7.4, §7.5 | Cursor acks after *applying* envelopes; `wake` stamped from `hook_event_name`, with `PostToolUse*` promoted to `soon` while a decide is held |
-| §12 | `HTTPS_PROXY` / `NO_PROXY`, system trust store, `--relay-ca`; `CLAIR_AGENT_URL` for devcontainers |
-| §13 | Failure modes the daemon must survive: relay unreachable (queue, jittered backoff), restart (`reset`), revoke (`410` → remove hooks and keys, print why), skew (`401` → adopt `Date`) |
-| §14 | Phasing: this repository's first milestone is phase 2 (tunnel + pair), then 3 (wake), then 4 (hardening: SSE fallback, quota telemetry, rate limits) |
-| §15 | Open: Windows install shape (after macOS/Linux); whether the QR may name any relay |
+| RELAY.md | Package | What it owns |
+| --- | --- | --- |
+| §4, §4.1 | `internal/hookserver`, `internal/record` | Loopback listener on `127.0.0.1:7317` with `HookServer`'s bearer-and-path contract; tunnel records (`request` / `response` / `control`); `/hook/event`, `/statusline`, `/ping` answered `204` locally; `/hook/decide` held open until the response record or the deadline; `/status` answered locally |
+| §4.2 | `internal/tunnel` | One bounded FIFO per pair (draft 2 000 records / 16 MiB), shedding `no` first, then `soon`, never `now`; in memory; `reset` on start, `cancel` when Claude Code abandons a decide |
+| §5.1 | `internal/identity`, `internal/state` | Host X25519 + Ed25519 seeds in `host.key` (0600) under `os.UserConfigDir()/clair` — `~/.config/clair` on Linux, `~/Library/Application Support/clair` on macOS, `%AppData%\clair` on Windows; `CLAIR_CONFIG_DIR` overrides |
+| §5.2–5.4 | `internal/envelope` | HKDF derivation with `salt = k`; the envelope (`v`, `pair`, `id`, `dir`, `wake`, `ttlSec`, `ct`); XChaCha20-Poly1305 with a 24-byte random nonce and the exact AAD layout; per-direction replay counters (`Counter`, `HighWater`); ULID ids; the 4 MiB cap and the derived 3 145 592-byte record cap |
+| §5.5 | `internal/envelope` | Standard-library `crypto/ecdh`, `crypto/hkdf`, `crypto/ed25519`; `golang.org/x/crypto/chacha20poly1305` is the only outside import (RELAY.md names `x/crypto/{curve25519,hkdf}`; the stdlib has both since Go 1.20/1.24) |
+| §6 | `internal/pairing` | `clair pair`: mint, the QR (`rsc.io/qr`, half-blocks, `-qr ascii|none`, `-invert`), wait, prove the phone knows `k` by opening `hello`, confirm on the controlling terminal, `hello-ack`, write the pair file and `settings.json`, reload the daemon |
+| §6.1 | `internal/pairing` | Payload `0x01 ‖ pairingId[16] ‖ hostPub[32] ‖ k[16] ‖ relay-host?` as `https://<relay>/p#<base64url>`; version 6 at level L |
+| §6.5, §6.6 | `internal/claudecfg`, `internal/ojson` | The order-preserving `settings.json` merge, the `clair statusline` shim, snippet substitution and validation; `clair unpair`; `410` handling |
+| §7.2, §7.3 | `internal/relay` | SSE down + `POST` up (no WebSocket); `Authorization: Clair-Ed25519 …` with the relay's canonical string; skew from `serverTime`, then `Date`; bounded streams resumed with `Last-Event-ID`; one upload in flight per (pair, dir); `--relay-ca`, `HTTPS_PROXY` |
+| §7.4, §7.5 | `internal/tunnel`, `internal/record` | Cursor acks after *applying* envelopes, coalesced to 1 s; `wake` stamped from `hook_event_name`, `PostToolUse*` promoted to `soon` while a decide is held; TTLs |
+| §7.6 | `internal/tunnel`, `internal/ctl` | Presence shown by `clair status` |
+| §12 | `internal/relay` | `HTTPS_PROXY` / `NO_PROXY` through `http.ProxyFromEnvironment`, system trust store, `--relay-ca` replaces it |
+| §13 | `internal/tunnel`, `internal/daemon` | Relay unreachable (queue, backoff), restart (`reset`), revoke (`410` → hooks and keys removed, daemon keeps serving `204`s), skew (`401` → adopt `serverTime`) |
+| §14 | — | Phase 2 (tunnel + pair) is implemented; the agent's part of phase 3 (`wake`) too; OS service install, releases and `install.sh` are later plans |
+
+`internal/daemon` wires the above for `clair daemon`; `cmd/clair` is the dispatch.
+`tools/phonesim` is a phone stand-in and `tools/relaysim` serves the fake relay, for
+running the whole thing as real processes before the Android `RelayIngress` exists.
+
+## Divergences from RELAY.md and from the phone's LAN contract
+
+Deliberate, all recorded in ADRs:
+
+- **SSE + `POST` only**; no WebSocket (ADR 2026-09.khcq; the relay's platform).
+- **Strict `Bearer `** on the loopback (the phone's guard also accepts a bare token).
+- **`405` + `Allow`** for a wrong method on a known path (the phone's routing is untested there).
+- **`GET /clair/v1/status`** is answered locally with the agent's status (RELAY.md has it
+  round-trip; debug-only).
+- **Records over 3 145 592 bytes are dropped at enqueue** (a decide so dropped answers `204` at
+  once); the phone's 4 MiB → `413` body rule stays on the loopback.
+- **`clair statusline`** replaces the `sh clair-statusline.sh` shim (ADR 2026-09.evep).
+- **Config lives under `os.UserConfigDir()/clair`**, which is `~/.config/clair` on Linux only.
+
+## RELAY.md revision proposal (to carry into `clair/docs/RELAY.md` and the relay's `protocol.md`)
+
+- **G1** — the sender's `n` must survive restarts: block reservation, persisted before use
+  (ADR 2026-09.hzwt). ADR ew4t's "neither end persists a counter" is about nonces.
+- **G2** — a `cancel {reqId}` control record (host → phone, `soon`) when Claude Code abandons
+  a held decide; on shutdown held decides answer `204` and `cancel` is sent best-effort;
+  `reset {}` follows the `hello-ack` on every start.
+- **G3** — a snippet is accepted only if every hook is the agent's own `http` hook, or the
+  one `command` hook that runs this binary's `hook-event` (ADR 2026-09.3gre); the phone's
+  block must carry `__PORT__`, `__TOKEN__`, `__CLAIR_HOST__` and `__CLAIR_EXE__`.
+- **G4** — `SessionStart` **cannot** be an `http` hook: Claude Code 2.1.278 logs "HTTP hooks are
+  not supported for SessionStart" and skips it (verified with a real session). It is a
+  `command` hook running `<clair> hook-event /clair/v1/hook/event` — this binary, never
+  `curl` — and a phone snippet renders it as `__CLAIR_EXE__ hook-event /clair/v1/hook/event`
+  (the fourth placeholder). RELAY.md §4's "SessionStart finally becomes an http hook" is wrong;
+  the phone's LAN snippet had it right.
+- **G5** — the plaintext record cap is 3 145 592 bytes under the 4 MiB envelope cap.
+- **QR payload** — the binary layout above; `relay` omitted when it equals the origin; level L.
+- **Control schemas** — `hello {name, snippet?}`, `hello-ack {hostname, agentVersion}`,
+  `snippet {snippet}`, `reset {}`, `cancel {reqId}`, `revoke {}`; `n` is `uint64`.
+- **`fp`** is shown as lowercase hex in groups of four.
+
+## Vectors
+
+`:shared/relay` has not published `relay-vectors.json` yet. `internal/envelope/vectors_test.go`
+holds the loader and the proposed schema (pinned `k`, both key pairs, derived keys, and per
+envelope the header, `nonce`, exact `recordBytes`, `aad` and `ct`, all base64url) and skips
+with a named reason until the file is copied into `internal/envelope/testdata/`. Until then
+the crypto is pinned by RFC 5869 A.1 and draft-irtf-cfrg-xchacha A.3.1 through our layout,
+plus an independent HKDF in the tests.
 
 ## Numbers that are *draft*
 
-Queue bounds, mailbox caps, TTL clamps, the charging/unmetered stream policy and the 5-min
-`soon` coalescing are starting points (RELAY.md's status line). Put each behind one named
-constant with a comment citing the section, so they change in one place when they move.
+Queue bounds, TTLs, backoffs, the ack interval, the counter block and flush cadence are
+starting points (RELAY.md's status line). Each is one named constant with a comment citing
+its section: `internal/tunnel/tunnel.go`, `internal/relay/client.go`, `internal/record/wake.go`,
+`internal/envelope/envelope.go`.

@@ -11,8 +11,9 @@ ADR 2026-09.kau2; the design constraints come from `RELAY.md` (see `context/desi
 - Everything else is under `internal/` — this module exposes no importable API, and the
   compiler enforces it. One package per concern, named for what it holds (`relay`,
   `tunnel`, `pairing`), never `util`, `common` or `helpers`.
-- `tools/` holds developer tools (`tools/adr`); they are `go run`, never shipped, and
-  stdlib-only.
+- `tools/` holds developer tools; they are `go run`, never shipped. `tools/adr` is
+  stdlib-only; `tools/phonesim` and `tools/relaysim` may import `internal/` and
+  `golang.org/x`, because they *are* the far end of the protocol.
 - OS-specific code goes behind build tags (`_linux.go`, `_darwin.go`, `_windows.go`), and
   `make build-all` must keep compiling for all six targets in the Makefile.
 
@@ -37,12 +38,16 @@ ADR 2026-09.kau2; the design constraints come from `RELAY.md` (see `context/desi
   `context.Background()` appears in `main` and tests only.
 - Every goroutine has an owner that can stop it and a documented reason to exist. The
   race detector (`make test`) is the judge; a data race is a bug even if it "can't matter".
+- A phone-supplied snippet may only shape the agent's own `http` hooks (ADR 2026-09.3gre):
+  never write a `command` hook from anything the phone sent.
 
 ## The tunnel is blind — a domain rule
 
 - The agent reads **one** plaintext field of a hook, `hook_event_name`, to choose the wake
   hint (RELAY.md §4, §7.5). It never inspects, transforms or branches on any other part of
-  a hook body. If a change needs more, that is a design change: an ADR first.
+  a hook body. If a change needs more, that is a design change: an ADR first. The one
+  nuance: the loopback server checks that `session_id` is *present* — the phone's 400 rule,
+  so a hook the phone would drop fails fast instead of hanging a decide — and never reads it.
 - **Never log plaintext.** Hook bodies are tool inputs, commands, file paths and plans.
   Log sizes, ids (`reqId`, envelope `id`), paths and hints — never `body`, never a key,
   never `k`. Use `log/slog` with static messages and `snake_case` keys (`sloglint`).

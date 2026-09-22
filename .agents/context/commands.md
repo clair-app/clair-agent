@@ -38,7 +38,31 @@ linker-injected version.
 
 ## Direct invocations that are fine
 
-- `go test ./internal/relay/ -run TestVectors -v` while iterating; finish with `make test`.
-- `go run ./cmd/clair version`.
+- `go test ./internal/envelope/ -run TestVectors -v` while iterating; finish with `make test`.
+- `go test ./internal/daemon/ -run TestEndToEnd -race -v` — fake Claude Code → daemon → fake
+  relay → fake phone, in one process.
+- `go run ./cmd/clair version`, `make run ARGS="daemon -log-level debug"`.
 - `bin/golangci-lint run ./internal/relay/` for one package — but always the `./bin` copy,
   never a `golangci-lint` from `$PATH` (a different version lints differently).
+
+## Running the whole thing without a phone or a relay
+
+Point both config directories at scratch space so nothing of yours is touched:
+
+```sh
+export CLAIR_CONFIG_DIR=/tmp/clair-scratch CLAUDE_CONFIG_DIR=/tmp/claude-scratch
+go run ./tools/relaysim -listen 127.0.0.1:3000            # the fake relay, on a port
+go run ./cmd/clair daemon -relay http://127.0.0.1:3000     # in a second terminal
+go run ./cmd/clair pair -qr none                           # prints a link; leave it waiting
+go run ./tools/phonesim -v '<the link>'                    # the "phone": completes the pairing, answers decides
+go run ./cmd/clair status
+curl -X POST -H "Authorization: Bearer $(jq -r .token $CLAIR_CONFIG_DIR/agent.json)" \
+  --data '{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}' \
+  'http://127.0.0.1:7317/clair/v1/hook/decide?timeout=30'   # → the phone's hookSpecificOutput, HTTP 200
+go run ./cmd/clair unpair
+```
+
+Against a real relay, drop `relaysim` and pass its URL to `-relay`; `tools/phonesim` still
+plays the phone until the Android `RelayIngress` exists. `CLAUDE_CONFIG_DIR` is Claude Code's
+own variable: with it set, a real `claude` session in a scratch project picks up the written
+hooks.
