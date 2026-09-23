@@ -347,37 +347,44 @@ func (*Client) statusError(path string, resp *http.Response, data []byte) *Statu
 	if json.Unmarshal(data[:min(len(data), maxErrorBody)], &body) == nil {
 		e.Code, e.Reason = body.Error, body.Reason
 	}
+	var sentinel error
 	switch resp.StatusCode {
 	case http.StatusBadRequest:
-		e.sentinel = ErrBadRequest
+		sentinel = ErrBadRequest
 	case http.StatusUnauthorized:
-		e.sentinel = ErrUnauthorized
+		sentinel = ErrUnauthorized
 	case http.StatusNotFound:
-		e.sentinel = ErrNotFound
+		// Only the relay's own code parks a pair; a 404 without it is an
+		// edge's or a proxy's and a routine failure (ADR 2026-09.32b5).
+		sentinel = ErrNotFound
+		if e.Code == "pair_not_found" {
+			e.sentinels = append(e.sentinels, ErrPairNotFound)
+		}
 	case http.StatusConflict:
-		e.sentinel = ErrPairingUsed
+		sentinel = ErrPairingUsed
 	case http.StatusGone:
 		if e.Code == "pairing_expired" {
-			e.sentinel = ErrPairingExpired
+			sentinel = ErrPairingExpired
 		} else {
-			e.sentinel = ErrRevoked
+			sentinel = ErrRevoked
 		}
 	case http.StatusRequestEntityTooLarge:
-		e.sentinel = ErrTooLarge
+		sentinel = ErrTooLarge
 	case http.StatusTooManyRequests:
 		e.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), resp.Header.Get("Date"))
 		if e.Code == "mailbox_full" {
-			e.sentinel = ErrMailboxFull
+			sentinel = ErrMailboxFull
 		} else {
-			e.sentinel = ErrRateLimited
+			sentinel = ErrRateLimited
 		}
 	default:
 		if resp.StatusCode >= 500 {
-			e.sentinel = ErrUnavailable
+			sentinel = ErrUnavailable
 		} else {
-			e.sentinel = ErrProtocol
+			sentinel = ErrProtocol
 		}
 	}
+	e.sentinels = append(e.sentinels, sentinel)
 	return e
 }
 
@@ -712,8 +719,22 @@ func (c *Client) Ack(ctx context.Context, pair string, cursor Cursor) error {
 	return err
 }
 
-// Revoke ends the pair from this side (DELETE /v1/pairs/{pair}, RELAY.md §6.6).
+// Revoke ends the pair from this side (DELETE /v1/pairs/{pair}, RELAY.md
+// §6.6). The relay purges what this side would have received and keeps what
+// it sent — the sealed `revoke` above all — for the other side to drain; so
+// the goodbye goes up first and the DELETE after it (ADR 2026-09.69ym).
 func (c *Client) Revoke(ctx context.Context, pair string) error {
 	_, err := c.do(ctx, http.MethodDelete, "/v1/pairs/"+url.PathEscape(pair), nil)
+	return err
+}
+
+// ReleaseStream says this side let go of its stream on purpose (DELETE
+// /v1/pairs/{pair}/events): the relay marks the side idle at once, where a
+// closed SSE stream would otherwise keep it "connected" until its heartbeat
+// aged out, since the platform never tells the relay a client left. Call it
+// once the stream has ended and before opening another: a late release takes
+// presence from the new stream.
+func (c *Client) ReleaseStream(ctx context.Context, pair string) error {
+	_, err := c.do(ctx, http.MethodDelete, "/v1/pairs/"+url.PathEscape(pair)+"/events", nil)
 	return err
 }

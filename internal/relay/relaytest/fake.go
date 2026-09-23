@@ -6,6 +6,12 @@
 // records what clients did. It implements the relay's published contract
 // (internal/relay/testdata/openapi.json, checked by the relay package's
 // contract test) for the routes the agent and the phone use, not the relay.
+//
+// A revoke keeps the goodbye (RELAY.md r9 §6.6, relay ADR 2026-09.ppxy): a
+// DELETE purges only what the revoker would have received, and the other
+// side's stream drains what the revoker sent — its sealed `revoke` — before
+// `revoked`, and may ack it. The WebSocket (`/stream`) is not spoken: a plain
+// GET is told to upgrade, as the relay tells it.
 package relaytest
 
 import (
@@ -101,6 +107,9 @@ type pairingRec struct {
 type pairRec struct {
 	host, phone string
 	revoked     bool
+	// revokedBy is the side whose DELETE revoked the pair; "" for the idle
+	// sweep, which keeps nothing for either side.
+	revokedBy Role
 	// The stream that owns each side's presence, 0 for none: the newest
 	// open wins and an older one ends quietly (relay ADR 2026-09.7fc3).
 	hostStream, phoneStream int64
@@ -256,13 +265,49 @@ func (f *Fake) MaxInFlight(pairID string, dir envelope.Dir) int {
 	return f.maxFlight[pairID+"/"+string(dir)]
 }
 
-// Revoke marks a pair revoked, as the other side's DELETE would.
-func (f *Fake) Revoke(pairID string) {
+// Revoke marks a pair revoked as the phone's DELETE would: what the phone
+// would have received is purged, what it sent stays for the host to drain.
+func (f *Fake) Revoke(pairID string) { f.RevokeBy(pairID, RolePhone) }
+
+// RevokeBy marks a pair revoked by one side's DELETE, or by the idle sweep
+// when by is "": the revoker's inbound rows are purged (both directions for
+// the sweep), and the rows it sent stay deliverable to the other side.
+func (f *Fake) RevokeBy(pairID string, by Role) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if p, ok := f.pairs[pairID]; ok {
-		p.revoked = true
+	if p, ok := f.pairs[pairID]; ok && !p.revoked {
+		f.revokeLocked(pairID, p, by)
 	}
+}
+
+// revokeLocked sets the tombstone and purges; the caller holds f.mu.
+func (f *Fake) revokeLocked(pairID string, p *pairRec, by Role) {
+	p.revoked, p.revokedBy = true, by
+	kept := f.rows[:0]
+	for i := range f.rows {
+		r := &f.rows[i]
+		if r.pair == pairID && (by == "" || r.dir == inboundOf(by)) {
+			continue
+		}
+		kept = append(kept, *r)
+	}
+	clear(f.rows[len(kept):])
+	f.rows = kept
+}
+
+// retainsLocked reports whether a revoked pair still holds rows the other
+// side sent role: only when that side revoked it, and while one is left. The
+// caller holds f.mu.
+func (f *Fake) retainsLocked(pairID string, p *pairRec, role Role) bool {
+	if p.revokedBy != peerOf(role) {
+		return false
+	}
+	for i := range f.rows {
+		if f.rows[i].pair == pairID && f.rows[i].dir == inboundOf(role) {
+			return true
+		}
+	}
+	return false
 }
 
 // Set changes knobs under the lock.
@@ -481,6 +526,10 @@ func (f *Fake) route(w http.ResponseWriter, r *http.Request, who authed, body []
 		f.ack(w, who, parts[2], body)
 	case r.Method == http.MethodGet && len(parts) == 4 && parts[1] == "pairs" && parts[3] == "events":
 		f.events(w, r, who, parts[2])
+	case r.Method == http.MethodDelete && len(parts) == 4 && parts[1] == "pairs" && parts[3] == "events":
+		f.releaseStream(w, who, parts[2])
+	case r.Method == http.MethodGet && len(parts) == 4 && parts[1] == "pairs" && parts[3] == "stream":
+		f.plainStream(w, who, parts[2])
 	case r.Method == http.MethodDelete && len(parts) == 3 && parts[1] == "pairs":
 		f.revokePair(w, who, parts[2])
 	default:
@@ -502,8 +551,10 @@ func (f *Fake) mintPairing(w http.ResponseWriter, who authed) {
 	writeJSON(w, http.StatusCreated, map[string]any{"pairingId": id, "expiresAt": now.Add(pairingLife).UTC().Format(time.RFC3339)})
 }
 
-// member reports the caller's role in a pair, answering 404/410 itself.
-func (f *Fake) member(w http.ResponseWriter, who authed, pairID string) (Role, bool) {
+// member reports the caller's role in a pair, answering 404/410 itself. A
+// route that serves retained rows (the streams' drain and /ack) lets the
+// side that did not revoke in while the revoker's rows for it remain.
+func (f *Fake) member(w http.ResponseWriter, who authed, pairID string, retained bool) (Role, bool) {
 	f.mu.Lock()
 	p, ok := f.pairs[pairID]
 	ok = ok && idPattern.MatchString(pairID)
@@ -518,7 +569,7 @@ func (f *Fake) member(w http.ResponseWriter, who authed, pairID string) (Role, b
 		default:
 			ok = false
 		}
-		revoked = p.revoked
+		revoked = p.revoked && (!retained || !f.retainsLocked(pairID, p, role))
 	}
 	f.mu.Unlock()
 	if !ok {
@@ -532,12 +583,22 @@ func (f *Fake) member(w http.ResponseWriter, who authed, pairID string) (Role, b
 	return role, true
 }
 
-// outbound is the direction a role uploads; inbound the one it receives.
+// outbound is the direction a role uploads; inboundOf the one it receives.
 func outbound(role Role) envelope.Dir {
 	if role == RoleHost {
 		return envelope.DirH2P
 	}
 	return envelope.DirP2H
+}
+
+func inboundOf(role Role) envelope.Dir { return outbound(role).Opposite() }
+
+// peerOf is the other side of a pair.
+func peerOf(role Role) Role {
+	if role == RoleHost {
+		return RolePhone
+	}
+	return RoleHost
 }
 
 // checkEnvelope validates one uploaded envelope as the relay does: its
@@ -671,7 +732,7 @@ func (f *Fake) waitPairing(w http.ResponseWriter, r *http.Request, who authed, i
 }
 
 func (f *Fake) upload(w http.ResponseWriter, who authed, pairID string, body []byte) {
-	role, ok := f.member(w, who, pairID)
+	role, ok := f.member(w, who, pairID, false)
 	if !ok {
 		return
 	}
@@ -754,7 +815,7 @@ func unwrapBatch(body []byte) (items []json.RawMessage, code string) {
 }
 
 func (f *Fake) ack(w http.ResponseWriter, who authed, pairID string, body []byte) {
-	role, ok := f.member(w, who, pairID)
+	role, ok := f.member(w, who, pairID, true)
 	if !ok {
 		return
 	}
@@ -770,7 +831,7 @@ func (f *Fake) ack(w http.ResponseWriter, who authed, pairID string, body []byte
 		return
 	}
 	cursor := *req.Cursor
-	inbound := outbound(role).Opposite()
+	inbound := inboundOf(role)
 	f.mu.Lock()
 	kept := f.rows[:0]
 	for i := range f.rows {
@@ -778,23 +839,52 @@ func (f *Fake) ack(w http.ResponseWriter, who authed, pairID string, body []byte
 			kept = append(kept, f.rows[i])
 		}
 	}
+	clear(f.rows[len(kept):])
 	f.rows = kept
 	f.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// revokePair is DELETE /v1/pairs/{id}: revoked by the caller, whose inbound
+// rows go; what it sent stays for the other side.
 func (f *Fake) revokePair(w http.ResponseWriter, who authed, pairID string) {
-	if _, ok := f.member(w, who, pairID); !ok {
+	role, ok := f.member(w, who, pairID, false)
+	if !ok {
 		return
 	}
 	f.mu.Lock()
-	f.pairs[pairID].revoked = true
+	if p := f.pairs[pairID]; !p.revoked {
+		f.revokeLocked(pairID, p, role)
+	}
 	f.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// releaseStream is DELETE /v1/pairs/{id}/events: the caller's side is idle
+// at once, and the stream that held it ends quietly on its next tick.
+func (f *Fake) releaseStream(w http.ResponseWriter, who authed, pairID string) {
+	role, ok := f.member(w, who, pairID, false)
+	if !ok {
+		return
+	}
+	f.mu.Lock()
+	*f.pairs[pairID].owner(role) = 0
+	f.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// plainStream is GET /v1/pairs/{id}/stream without a WebSocket upgrade,
+// which is all the fake ever answers there; a draining pair's too.
+func (f *Fake) plainStream(w http.ResponseWriter, who authed, pairID string) {
+	if _, ok := f.member(w, who, pairID, true); !ok {
+		return
+	}
+	w.Header().Set("Upgrade", "websocket")
+	refuse(w, http.StatusUpgradeRequired, "upgrade_required")
+}
+
 func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID string) {
-	role, ok := f.member(w, who, pairID)
+	role, ok := f.member(w, who, pairID, true)
 	if !ok {
 		return
 	}
@@ -806,7 +896,7 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID
 		}
 		last, _ = strconv.ParseInt(ids[0], 10, 64)
 	}
-	inbound := outbound(role).Opposite()
+	inbound := inboundOf(role)
 	f.mu.Lock()
 	f.lastIDs = append(f.lastIDs, r.Header.Get("Last-Event-ID"))
 	p := f.pairs[pairID]
@@ -837,10 +927,7 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID
 		limit, retry := f.StreamLimit, f.RetryMS
 		revoked := p.revoked
 		superseded := *p.owner(role) != mine
-		peer := RolePhone
-		if role == RolePhone {
-			peer = RoleHost
-		}
+		peer := peerOf(role)
 		peerOpen := *p.owner(peer) != 0
 		var next *row
 		for i := range f.rows {
@@ -850,7 +937,8 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID
 			}
 		}
 		f.mu.Unlock()
-		if revoked {
+		// A revoked pair's stream drains what the revoker left for it first.
+		if revoked && next == nil {
 			write(fmt.Sprintf("id: %d\nevent: revoked\ndata: %s\n\n", last, mustJSON(map[string]string{"pairId": pairID})))
 			return
 		}

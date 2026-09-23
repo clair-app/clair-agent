@@ -4,7 +4,7 @@
     "title": "clair-relay",
     "version": "1",
     "summary": "The blind, end-to-end-encrypted relay between the Clair agent and the Clair phone app.",
-    "description": "Stores ciphertext envelopes in per-pair mailboxes, streams them to the receiver over SSE, and can read or forge nothing: the traffic keys come from a pairing secret the relay never sees.\n\n**Both ends speak SSE down and `POST` up.** Every error body is `{\"error\": \"<code>\", ...}`, and the status codes are part of the contract.\n\n**Requests are signed, not tokened.** Swagger UI cannot sign a request, so *Try it out* works only on the public routes; see the `ClairEd25519` scheme for the canonical string."
+    "description": "Stores ciphertext envelopes in per-pair mailboxes, streams them to the receiver over SSE, and can read or forge nothing: the traffic keys come from a pairing secret the relay never sees.\n\n**Down, the phone speaks a WebSocket (`/stream`) and the agent SSE (`/events`); up, both `POST`.** Every error body is `{\"error\": \"<code>\", ...}`, and the status codes are part of the contract.\n\n**Requests are signed, not tokened.** Swagger UI cannot sign a request, so *Try it out* works only on the public routes; see the `ClairEd25519` scheme for the canonical string.\n\n**Paths are exact.** Routing is case-sensitive and strict: a path in another case or with a trailing slash is `404`. `HEAD` on a stream route is `405 method_not_allowed`."
   },
   "servers": [
     {
@@ -98,7 +98,7 @@
         ],
         "operationId": "completePairing",
         "summary": "Complete a pairing (phone)",
-        "description": "Stores the phone's X25519 key and its hello envelope (`dir: p2h`, `pair` = this pairing's id) for the host's `/wait`. Completing registers the caller as a phone; a `pushToken` given here moves off any other device that held it. The minting host cannot complete its own pairing.",
+        "description": "Stores the phone's X25519 key and its hello envelope (`dir: p2h`, `pair` = this pairing's id) for the host's `/wait`. Completing registers the caller as a phone; a `pushToken` given here moves off any other device that held it. The minting host cannot complete its own pairing. Completions are limited per client address, unknown pairing ids included (`429 rate_limited`); a pairing already used answers `409` even when a pair cap is also reached.\n\n**A retry is idempotent.** The same phone key sending the same `phonePub` and a hello with the same envelope `id` to a pairing it already completed, while the pair it made is not revoked, is answered `201` with the same `pairId` again, and writes and charges nothing — no pair cap and no per-address attempt. So a phone that lost the answer retries with the identical body; any difference is a second completion (`409`).",
         "parameters": [
           {
             "name": "id",
@@ -122,7 +122,7 @@
         },
         "responses": {
           "201": {
-            "description": "Paired.",
+            "description": "Paired — or, for this phone's identical retry, paired already.",
             "content": {
               "application/json": {
                 "schema": {
@@ -132,7 +132,7 @@
             }
           },
           "400": {
-            "description": "The body or its envelope did not validate, or the host is completing its own pairing. — `error`: `invalid_body`, `invalid_envelope`, `pair_mismatch`, `dir_mismatch`, `self_pairing`",
+            "description": "The body is not JSON, the body or its envelope did not validate, or the host is completing its own pairing. — `error`: `bad_request`, `invalid_body`, `invalid_envelope`, `pair_mismatch`, `dir_mismatch`, `self_pairing`",
             "content": {
               "application/json": {
                 "schema": {
@@ -162,7 +162,7 @@
             }
           },
           "409": {
-            "description": "Another phone completed it first. — `error`: `pairing_used`",
+            "description": "Already completed: by another phone, by this phone with a different `phonePub` or hello, or the pair it made has been revoked. — `error`: `pairing_used`",
             "content": {
               "application/json": {
                 "schema": {
@@ -182,7 +182,7 @@
             }
           },
           "413": {
-            "description": "The envelope is over 4 MiB. — `error`: `envelope_too_large`",
+            "description": "The envelope is over 4 MiB of JSON, or the body over 4.5 MiB. — `error`: `envelope_too_large`, `payload_too_large`",
             "content": {
               "application/json": {
                 "schema": {
@@ -192,7 +192,7 @@
             }
           },
           "415": {
-            "description": "A body that is not `application/json` cannot be verified against the signature. — `error`: `unsupported_media_type`",
+            "description": "A body that is not `application/json`, or that carries a `Content-Encoding`, cannot be verified against the signature. Only the routes that declare a request body read one; a body sent anywhere else is refused the same way. — `error`: `unsupported_media_type`",
             "content": {
               "application/json": {
                 "schema": {
@@ -202,7 +202,7 @@
             }
           },
           "429": {
-            "description": "A limit was hit. `Retry-After` says when to try again. — `error`: `too_many_pairs`",
+            "description": "A limit was hit. `Retry-After` says when to try again. — `error`: `too_many_pairs`, `rate_limited`",
             "content": {
               "application/json": {
                 "schema": {
@@ -230,7 +230,7 @@
         ],
         "operationId": "waitForPairing",
         "summary": "Wait for the phone (host, SSE)",
-        "description": "Only the minting host may wait. Events: `pending` (`PendingEvent`) at once, then `completed` (`CompletedEvent`) or `expired` (`ExpiredEvent`), after which the stream ends. A host that reconnects after completion is served `completed` again until 15 min past expiry.\n\nEvery stream is bounded: it ends itself after `STREAM_MAX_SECONDS` (780 s on the public relay, under its 800 s function limit) with a final message carrying `retry: 1000` and `id:` set to the last delivered id. That is routine, not an error — reconnect with `Last-Event-ID`.\nA `: keepalive` comment arrives every `KEEPALIVE_SECONDS` (30 s by default).",
+        "description": "Only the minting host may wait. Events: `pending` (`PendingEvent`) at once, then `completed` (`CompletedEvent`) or `expired` (`ExpiredEvent`), after which the stream ends. A host that reconnects after completion is served `completed` again until 15 min past expiry. The newest `/wait` on a pairing owns it: an older one ends without an event, and a client treats that end like any other — it reconnects if it still needs the outcome.\n\nEvery stream is bounded: it ends itself after `STREAM_MAX_SECONDS` (780 s on the public relay, under its 800 s function limit) with a final message carrying `retry: 1000` and `id:` set to the last delivered id. That is routine, not an error — reconnect with `Last-Event-ID`.\nA `: keepalive` comment arrives every `KEEPALIVE_SECONDS` (30 s by default).",
         "parameters": [
           {
             "name": "id",
@@ -293,7 +293,7 @@
         ],
         "operationId": "revokePair",
         "summary": "Revoke a pair (either side)",
-        "description": "Purges the pair's mailbox. The other side's next call answers `410 pair_revoked`, and its open stream ends with `revoked`.",
+        "description": "Revokes the pair on the caller's word. The caller's inbound rows are purged; what the caller sent stays deliverable to the other side until acked or expired (≤ 24 h) — so a client ends a pair by uploading its sealed `revoke` record first and calling this once the upload is accepted. The other side's streams deliver those rows, then `revoked`, and its `/ack` is served while any are left; every other call on the pair, and every call of the caller's, answers `410 pair_revoked`.",
         "parameters": [
           {
             "name": "pairId",
@@ -330,7 +330,7 @@
             }
           },
           "410": {
-            "description": "The pair was revoked by either side. Remove its keys and hooks. — `error`: `pair_revoked`",
+            "description": "The pair was revoked by either side, or by the relay after an end was silent for 30 days. This status is the relay's word, not the other side's: only its sealed `revoke` record proves the pair is over. — `error`: `pair_revoked`",
             "content": {
               "application/json": {
                 "schema": {
@@ -349,7 +349,7 @@
         ],
         "operationId": "uploadEnvelopes",
         "summary": "Upload envelopes (either side)",
-        "description": "One envelope, or `{\"envelopes\": [...]}` with up to 100. `dir` must be the caller's outbound direction and `pair` this pair; both are in the receiver's AAD. A re-sent `id` is reported under `duplicates` and stored once. Keep **one upload in flight per pair and direction**: await the receipt before the next `POST`.",
+        "description": "One envelope, or `{\"envelopes\": [...]}` with up to 100. `dir` must be the caller's outbound direction and `pair` this pair; both are in the receiver's AAD. A re-sent `id` is reported under `duplicates` and stored once. A pair revoked while the upload was being stored answers `410` and stores nothing. Keep **one upload in flight per pair and direction**: await the receipt before the next `POST`.",
         "parameters": [
           {
             "name": "pairId",
@@ -390,7 +390,7 @@
             }
           },
           "400": {
-            "description": "An envelope or the batch did not validate. — `error`: `invalid_envelope`, `invalid_batch`, `too_many_envelopes`, `pair_mismatch`, `dir_mismatch`",
+            "description": "The body is not JSON, or an envelope or the batch did not validate. — `error`: `bad_request`, `invalid_envelope`, `invalid_batch`, `too_many_envelopes`, `pair_mismatch`, `dir_mismatch`",
             "content": {
               "application/json": {
                 "schema": {
@@ -420,7 +420,7 @@
             }
           },
           "410": {
-            "description": "The pair was revoked by either side. Remove its keys and hooks. — `error`: `pair_revoked`",
+            "description": "The pair was revoked by either side, or by the relay after an end was silent for 30 days. This status is the relay's word, not the other side's: only its sealed `revoke` record proves the pair is over. — `error`: `pair_revoked`",
             "content": {
               "application/json": {
                 "schema": {
@@ -440,7 +440,7 @@
             }
           },
           "415": {
-            "description": "A body that is not `application/json` cannot be verified against the signature. — `error`: `unsupported_media_type`",
+            "description": "A body that is not `application/json`, or that carries a `Content-Encoding`, cannot be verified against the signature. Only the routes that declare a request body read one; a body sent anywhere else is refused the same way. — `error`: `unsupported_media_type`",
             "content": {
               "application/json": {
                 "schema": {
@@ -450,7 +450,7 @@
             }
           },
           "429": {
-            "description": "A limit was hit. `Retry-After` says when to try again. — `error`: `mailbox_full`",
+            "description": "A limit was hit. `Retry-After` says when to try again. — `error`: `mailbox_full`, `relay_full`",
             "content": {
               "application/json": {
                 "schema": {
@@ -478,7 +478,7 @@
         ],
         "operationId": "ackEnvelopes",
         "summary": "Acknowledge inbound envelopes (either side)",
-        "description": "Deletes the caller's inbound rows up to and including `cursor`. Ack once the envelopes are applied, not when they arrive.",
+        "description": "Deletes the caller's inbound rows up to and including `cursor`. Ack once the envelopes are applied, not when they arrive. On a pair the other side revoked, still served while rows that side sent the caller are left.",
         "parameters": [
           {
             "name": "pairId",
@@ -505,7 +505,7 @@
             "description": "Acknowledged."
           },
           "400": {
-            "description": "The body did not validate. — `error`: `invalid_body`",
+            "description": "The body is not JSON or did not validate. — `error`: `bad_request`, `invalid_body`",
             "content": {
               "application/json": {
                 "schema": {
@@ -535,7 +535,17 @@
             }
           },
           "410": {
-            "description": "The pair was revoked by either side. Remove its keys and hooks. — `error`: `pair_revoked`",
+            "description": "The pair was revoked, and nothing is left for the caller to drain: the caller revoked it, the relay did, or every row the other side sent before revoking has been acked or has expired. This status is the relay's word, not the other side's: only its sealed `revoke` record proves the pair is over. — `error`: `pair_revoked`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 16 KiB. — `error`: `payload_too_large`",
             "content": {
               "application/json": {
                 "schema": {
@@ -545,7 +555,7 @@
             }
           },
           "415": {
-            "description": "A body that is not `application/json` cannot be verified against the signature. — `error`: `unsupported_media_type`",
+            "description": "A body that is not `application/json`, or that carries a `Content-Encoding`, cannot be verified against the signature. Only the routes that declare a request body read one; a body sent anywhere else is refused the same way. — `error`: `unsupported_media_type`",
             "content": {
               "application/json": {
                 "schema": {
@@ -564,7 +574,7 @@
         ],
         "operationId": "streamEvents",
         "summary": "The caller's inbound direction (either side, SSE)",
-        "description": "Events: `envelope` (`Envelope`, `id:` is its mailbox cursor), `presence` (`PresenceEvent`, on open and on every change), `revoked` (`RevokedEvent`, ends the stream). Opening the stream and every keepalive mark the caller present. Without `Last-Event-ID` the stream drains from the oldest un-acked row.\n\nEvery stream is bounded: it ends itself after `STREAM_MAX_SECONDS` (780 s on the public relay, under its 800 s function limit) with a final message carrying `retry: 1000` and `id:` set to the last delivered id. That is routine, not an error — reconnect with `Last-Event-ID`.\nA `: keepalive` comment arrives every `KEEPALIVE_SECONDS` (30 s by default).",
+        "description": "Events: `envelope` (`Envelope`, `id:` is its mailbox cursor), `presence` (`PresenceEvent`, on open and on every change), `revoked` (`RevokedEvent`, ends the stream). Opening the stream and every keepalive mark the caller present. Without `Last-Event-ID` the stream drains from the oldest un-acked row. On a pair the other side revoked, this is still served while rows that side sent the caller are left — its sealed `revoke` among them: the stream delivers them in cursor order, then `revoked`, and a stream that was open when the revoke landed drains them first too. With nothing left it answers `410`.\n\nEvery stream is bounded: it ends itself after `STREAM_MAX_SECONDS` (780 s on the public relay, under its 800 s function limit) with a final message carrying `retry: 1000` and `id:` set to the last delivered id. That is routine, not an error — reconnect with `Last-Event-ID`.\nA `: keepalive` comment arrives every `KEEPALIVE_SECONDS` (30 s by default).",
         "parameters": [
           {
             "name": "pairId",
@@ -628,7 +638,156 @@
             }
           },
           "410": {
-            "description": "The pair was revoked by either side. Remove its keys and hooks. — `error`: `pair_revoked`",
+            "description": "The pair was revoked, and nothing is left for the caller to drain: the caller revoked it, the relay did, or every row the other side sent before revoking has been acked or has expired. This status is the relay's word, not the other side's: only its sealed `revoke` record proves the pair is over. — `error`: `pair_revoked`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "pairs"
+        ],
+        "operationId": "releaseStream",
+        "summary": "Let go of the caller's stream on purpose (either side)",
+        "description": "The caller closed its stream deliberately. Its side is idle at once — the relay pushes for it again — and whichever stream still held it ends itself on its next tick. On Vercel a function is never told that an SSE client left, so a client that closes `/events` calls this, and awaits it before opening a new stream: a late one would take presence from the new stream, which would then end and have to reconnect. Closing `/stream` needs no call.",
+        "parameters": [
+          {
+            "name": "pairId",
+            "in": "path",
+            "required": true,
+            "description": "The pair id, which is the id of the pairing that created it.",
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Released."
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pair does not exist or the caller is neither side of it (existence is not disclosed). — `error`: `pair_not_found`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The pair was revoked by either side, or by the relay after an end was silent for 30 days. This status is the relay's word, not the other side's: only its sealed `revoke` record proves the pair is over. — `error`: `pair_revoked`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/pairs/{pairId}/stream": {
+      "get": {
+        "tags": [
+          "pairs"
+        ],
+        "operationId": "openStream",
+        "summary": "The caller's inbound direction over a WebSocket (either side; the phone's primary)",
+        "description": "A WebSocket upgrade, signed like any `GET` (the target is `/v1/pairs/{pairId}/stream`, the body empty), offering the subprotocol `clair-relay.v1`. A refusal is ordinary HTTP before the upgrade, with the usual JSON body. The same events as `/events`, each one JSON text frame (`StreamMessage`): `presence` on open and on every change, `envelope` (`id` is its mailbox cursor), `revoked`, and `reconnect` (`id` the last delivered cursor) before a routine close. The client sends no data frames — one closes the socket with 1003 — and **must answer pings**, which every WebSocket library does by itself.\n\nOn a pair the other side revoked, this is still served while rows that side sent the caller are left — its sealed `revoke` among them: the stream delivers them in cursor order, then `revoked`, and a stream that was open when the revoke landed drains them first too. With nothing left it answers `410`.\n\nThe relay pings every `KEEPALIVE_SECONDS` (30 s by default). Only a pong refreshes the caller's presence, and a ping unanswered for 30 s ends the socket without a close frame. After each mailbox batch the relay pings and waits for the pong before it reads the next, so at most one batch is unread by the client.\n\nClose codes: 1000 — the stream ended itself after `STREAM_MAX_SECONDS` (780 s on the public relay), after `reconnect`; 1001 — the relay is shutting down, after `reconnect`; 1011 — an error, after `reconnect`; 4409 — a newer stream on this side took over, or the caller released it (`DELETE /events`); 4410 — the pair was revoked, after `revoked`. Any close but 4410, and any socket that just ends, is a reconnect with `Last-Event-ID` set to the highest `id` received.",
+        "parameters": [
+          {
+            "name": "pairId",
+            "in": "path",
+            "required": true,
+            "description": "The pair id, which is the id of the pairing that created it.",
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "name": "Sec-WebSocket-Protocol",
+            "in": "header",
+            "required": true,
+            "description": "Must offer `clair-relay.v1`, which the relay selects.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "description": "Resume after this cursor.",
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{1,15}$"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols: a WebSocket speaking `clair-relay.v1`, whose frames are `StreamMessage`s."
+          },
+          "400": {
+            "description": "`Last-Event-ID` is not a cursor, or the subprotocol was not offered. — `error`: `invalid_last_event_id`, `unsupported_protocol`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pair does not exist or the caller is neither side of it (existence is not disclosed). — `error`: `pair_not_found`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The pair was revoked, and nothing is left for the caller to drain: the caller revoked it, the relay did, or every row the other side sent before revoking has been acked or has expired. This status is the relay's word, not the other side's: only its sealed `revoke` record proves the pair is over. — `error`: `pair_revoked`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "A plain `GET` without the WebSocket upgrade. Carries `Upgrade: websocket`. — `error`: `upgrade_required`",
             "content": {
               "application/json": {
                 "schema": {
@@ -663,7 +822,7 @@
             "description": "Stored."
           },
           "400": {
-            "description": "The body did not validate. — `error`: `invalid_body`",
+            "description": "The body is not JSON or did not validate. — `error`: `bad_request`, `invalid_body`",
             "content": {
               "application/json": {
                 "schema": {
@@ -702,8 +861,18 @@
               }
             }
           },
+          "413": {
+            "description": "The body is over 16 KiB. — `error`: `payload_too_large`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "415": {
-            "description": "A body that is not `application/json` cannot be verified against the signature. — `error`: `unsupported_media_type`",
+            "description": "A body that is not `application/json`, or that carries a `Content-Encoding`, cannot be verified against the signature. Only the routes that declare a request body read one; a body sent anywhere else is refused the same way. — `error`: `unsupported_media_type`",
             "content": {
               "application/json": {
                 "schema": {
@@ -963,7 +1132,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "Authorization",
-        "description": "Every device request is signed with its Ed25519 key; there are no tokens and no sign-up. A device is registered by minting (host) or completing (phone) a pairing.\n\n```text\nAuthorization: Clair-Ed25519 key=<b64url authPub>, ts=<unix seconds>, nonce=<b64url>, sig=<b64url signature>\nv2  sig = Ed25519( \"clair-v2\" \\n METHOD \\n host \\n path-with-query \\n ts \\n nonce \\n sha256hex(body) )\nv1  sig = Ed25519( METHOD \\n path-with-query \\n ts \\n sha256hex(body) )   (no nonce= parameter)\n```\n\n`METHOD` upper-case; `host` is the `Host` header sent, lower-case, with its port if one was sent; the path is the request target exactly as sent, query included; `sha256hex` is lowercase hex over the raw body bytes (an empty body hashes the empty string). `key`, `nonce` (16–32 random bytes) and `sig` are base64url without padding. `ts` must be within ±5 min of the relay's clock. A nonce is accepted once per key — a second use is `401 replay` — so send a fresh one on every request, retries included. v1 is accepted until the relay sets `AUTH_NONCE=required`. The SSE `GET`s are signed the same way."
+        "description": "Every device request is signed with its Ed25519 key; there are no tokens and no sign-up. A device is registered by minting (host) or completing (phone) a pairing.\n\n```text\nAuthorization: Clair-Ed25519 key=<b64url authPub>, ts=<unix seconds>, nonce=<b64url>, sig=<b64url signature>\nsig = Ed25519( \"clair-v2\" \\n METHOD \\n host \\n path-with-query \\n ts \\n nonce \\n sha256hex(body) )\n```\n\n`METHOD` upper-case; `host` is the `Host` header sent, lower-case, with its port if one was sent; the path is the request target exactly as sent, query included; `sha256hex` is lowercase hex over the raw body bytes (an empty body hashes the empty string). `key`, `nonce` (16–32 random bytes) and `sig` are base64url without padding. `ts` must be within ±5 min of the relay's clock. A nonce is accepted once per key — a second use is `401 replay` — so send a fresh one on every request, retries included. A header without a nonce is `401 malformed`. The SSE `GET`s and the WebSocket upgrade are signed the same way."
       },
       "CronBearer": {
         "type": "http",
@@ -1240,8 +1409,34 @@
           "at"
         ]
       },
+      "StreamMessage": {
+        "description": "One WebSocket text frame on `/stream`: an event as SSE would frame it, as JSON.",
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "envelope",
+              "presence",
+              "revoked",
+              "reconnect"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^\\d{1,15}$",
+            "description": "The mailbox cursor: an envelope's own, or the current one. Reconnect with the highest seen as `Last-Event-ID`."
+          },
+          "data": {
+            "description": "`Envelope`, `PresenceEvent` or `RevokedEvent`; absent on `reconnect`."
+          }
+        },
+        "required": [
+          "event",
+          "id"
+        ]
+      },
       "RevokedEvent": {
-        "description": "`event: revoked`, `id:` the current cursor. Ends the stream.",
+        "description": "`event: revoked`, `id:` the current cursor. Ends the stream, after any rows the revoking side left the caller.",
         "type": "object",
         "properties": {
           "pairId": {
@@ -1288,6 +1483,17 @@
       "SweepReport": {
         "type": "object",
         "properties": {
+          "skipped": {
+            "type": "boolean",
+            "description": "Another run held the lease; nothing was done."
+          },
+          "failedSteps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Steps that threw; every other step still ran."
+          },
           "mailboxExpired": {
             "type": "integer"
           },
@@ -1304,6 +1510,12 @@
             "type": "integer"
           },
           "noncesSwept": {
+            "type": "integer"
+          },
+          "limitCountersSwept": {
+            "type": "integer"
+          },
+          "countersRepaired": {
             "type": "integer"
           },
           "wakesSent": {

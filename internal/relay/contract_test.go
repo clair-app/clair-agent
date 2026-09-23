@@ -33,7 +33,7 @@ import (
 )
 
 // specPath is the relay's OpenAPI 3.1 document, copied unchanged from
-// clair-server commit 556d99f (`openapi.json` at its root; the relay serves it
+// clair-server commit a8393a7 (`openapi.json` at its root; the relay serves it
 // at /openapi.json). A refresh replaces the file and this commit together. A
 // check that then fails is drift between the relay and this client or the
 // fake, never a reason to edit the copy.
@@ -44,7 +44,8 @@ const specPath = "testdata/openapi.json"
 // published contract: the route and method exist, the status is declared,
 // the error code is one the spec lists for that status, JSON bodies and SSE
 // events match their schemas, and a 2xx request's body matches the request
-// schema. Every pairing and pair operation must be exercised.
+// schema. Every pairing and pair operation must be exercised: answered 2xx,
+// or for the WebSocket the agent never opens, refused as a plain GET.
 func TestContract(t *testing.T) {
 	t.Parallel()
 
@@ -106,6 +107,13 @@ func TestContract(t *testing.T) {
 		t.Errorf("Upload to a full mailbox: err = %v, want ErrMailboxFull", err)
 	}
 	fake.Set(func(f *relaytest.Fake) { f.MailboxFull = false })
+	// The host lets go of a stream it closed (DELETE /events).
+	if err = host.ReleaseStream(ctx, pair); err != nil {
+		t.Errorf("ReleaseStream: %v", err)
+	}
+	if err = host.ReleaseStream(ctx, other); !errors.Is(err, relay.ErrPairNotFound) {
+		t.Errorf("ReleaseStream of an unknown pair: err = %v, want ErrPairNotFound", err)
+	}
 
 	// Refusals only a raw request can provoke: the client never sends them.
 	envelopes := "/v1/pairs/" + pair + "/envelopes"
@@ -138,6 +146,9 @@ func TestContract(t *testing.T) {
 		{"a body over the parser limit", http.MethodPost, envelopes, "", lone(bulky(14, 5<<20)), "", 413, "payload_too_large"},
 		{"an ack with a string cursor", http.MethodPost, "/v1/pairs/" + pair + "/ack", "", []byte(`{"cursor":"1"}`), "", 400, "invalid_body"},
 		{"a Last-Event-ID that is not a cursor", http.MethodGet, "/v1/pairs/" + pair + "/events", "", nil, "x", 400, "invalid_last_event_id"},
+		// The agent speaks SSE only (ADR 2026-09.khcq); the WebSocket route
+		// answers a plain GET with what it should have asked for.
+		{"a plain GET of the WebSocket", http.MethodGet, "/v1/pairs/" + pair + "/stream", "", nil, "", 426, "upgrade_required"},
 	} {
 		status, code := raw.do(hostKeys, c.method, c.path, c.contentType, c.body, c.lastID)
 		if status != c.status || code != c.code {
@@ -183,7 +194,9 @@ func TestContract(t *testing.T) {
 		t.Errorf("a host completing its own pairing: %d %s, want 400 self_pairing", status, code)
 	}
 
-	// The phone drains its stream, acking what it applied; the host revokes.
+	// The phone drains its stream, acking what it applied; the host revokes
+	// after the second, and the relay keeps the third — what the host sent —
+	// for the phone to drain and ack before `revoked` (RELAY.md r9 §6.6).
 	var seen int
 	err = phone.Stream(ctx, pair, "", func(ctx context.Context, ev relay.Event) error {
 		if ev.Kind != relay.EventEnvelope {
@@ -193,7 +206,7 @@ func TestContract(t *testing.T) {
 			return ackErr
 		}
 		seen++
-		if seen == 3 {
+		if seen == 2 {
 			return host.Revoke(ctx, pair)
 		}
 		return nil
@@ -203,6 +216,16 @@ func TestContract(t *testing.T) {
 	}
 	if _, err = host.Upload(ctx, pair, []envelope.Envelope{mkEnv(t, pair, envelope.DirH2P, 200, 8)}); !errors.Is(err, relay.ErrRevoked) {
 		t.Errorf("Upload to a revoked pair: err = %v, want ErrRevoked", err)
+	}
+	// With nothing left for it, the phone is refused like everyone else.
+	if err = phone.Stream(ctx, pair, "", func(context.Context, relay.Event) error { return nil }); !errors.Is(err, relay.ErrRevoked) {
+		t.Errorf("Stream of a drained revoked pair: err = %v, want ErrRevoked", err)
+	}
+	if err = phone.Ack(ctx, pair, "1"); !errors.Is(err, relay.ErrRevoked) {
+		t.Errorf("Ack on a drained revoked pair: err = %v, want ErrRevoked", err)
+	}
+	if err = phone.ReleaseStream(ctx, pair); !errors.Is(err, relay.ErrRevoked) {
+		t.Errorf("ReleaseStream on a revoked pair: err = %v, want ErrRevoked", err)
 	}
 
 	// A pairing that expires while the host waits: `expired`, then 410; the
@@ -250,13 +273,16 @@ func TestContract(t *testing.T) {
 	}
 
 	srv.Close() // waits for every handler, so the log is complete
+	// Only an upgrade answers /stream 2xx (101), and the agent never asks for
+	// one: its refusal is what the client can meet, so it is what is covered.
+	refusedOnly := map[string]int{"openStream": http.StatusUpgradeRequired}
 	exercised := make(map[string]bool)
 	for _, ex := range rec.exchanges() {
 		op, errs := doc.check(ex)
 		for _, e := range errs {
 			t.Errorf("%s %s → %d: %s", ex.method, ex.path, ex.status, e)
 		}
-		if op != nil && ex.status/100 == 2 {
+		if op != nil && (ex.status/100 == 2 || refusedOnly[op.OperationID] == ex.status) {
 			exercised[op.OperationID] = true
 		}
 	}

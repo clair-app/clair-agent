@@ -3,6 +3,8 @@ package relay
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"slices"
 	"time"
 )
 
@@ -15,9 +17,17 @@ var (
 	// ErrBadRequest is a 400: an envelope whose dir does not match the caller's
 	// role, a pair that does not match the path, a malformed body.
 	ErrBadRequest = errors.New("relay: bad request")
-	// ErrNotFound is a 404: a pair the caller is not a member of, or a pairing
-	// another host minted (the relay does not disclose existence).
+	// ErrNotFound is any 404: a pairing another host minted or a pair the
+	// caller is not a member of (the relay does not disclose existence) — or
+	// an edge, a proxy or the platform answering for a relay it cannot reach,
+	// such as Vercel's DEPLOYMENT_NOT_FOUND mid-deploy. Only the relay's own
+	// `pair_not_found` says anything about a pair: that one is also
+	// ErrPairNotFound.
 	ErrNotFound = errors.New("relay: not found")
+	// ErrPairNotFound is a 404 whose `error` is `pair_not_found`: the relay's
+	// word that it does not know the pair, or that the caller is not a member
+	// of it. It is also ErrNotFound.
+	ErrPairNotFound = errors.New("relay: pair not found")
 	// ErrPairingUsed is a 409 on complete: a phone got there first (§6.3).
 	ErrPairingUsed = errors.New("relay: pairing already used")
 	// ErrPairingExpired is a 410 `pairing_expired`: the ten minutes are over.
@@ -53,7 +63,7 @@ type StatusError struct {
 	// Path is the request path, for the message.
 	Path string
 
-	sentinel error
+	sentinels []error
 }
 
 func (e *StatusError) Error() string {
@@ -67,5 +77,16 @@ func (e *StatusError) Error() string {
 	return msg
 }
 
-// Unwrap yields the sentinel that classifies the status.
-func (e *StatusError) Unwrap() error { return e.sentinel }
+// Unwrap yields the sentinels that classify the status: one, or for a 404
+// `pair_not_found` both ErrPairNotFound and ErrNotFound.
+func (e *StatusError) Unwrap() []error { return e.sentinels }
+
+// relayCodes404 are the `error` codes the relay itself answers a 404 with.
+var relayCodes404 = []string{"pair_not_found", "pairing_not_found", "device_not_found"}
+
+// edgeNotFound reports a 404 the relay did not answer itself: no `error`
+// code of its own, so it came from an edge, a proxy or the platform in front
+// of the relay and says nothing about the pair. It is retried like a 5xx.
+func (e *StatusError) edgeNotFound() bool {
+	return e.Status == http.StatusNotFound && !slices.Contains(relayCodes404, e.Code)
+}

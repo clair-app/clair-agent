@@ -75,7 +75,8 @@ func (e *handlerError) Unwrap() error { return e.err }
 // relay's `retry:`, a failed connection after a jittered exponential backoff,
 // a corrected clock or a spent nonce immediately, once. It returns when ctx ends, when h returns an
 // error, with ErrRevoked after a `revoked` event or a 410, and with the
-// relay's answer for anything a reconnect cannot fix (404, 401, …).
+// relay's answer for anything a reconnect cannot fix (its own 404, 401, …);
+// a 404 the relay did not answer itself is a failed connection.
 func (c *Client) Stream(ctx context.Context, pair string, last Cursor, h Handler) error {
 	path := "/v1/pairs/" + url.PathEscape(pair) + "/events"
 	return c.follow(ctx, path, string(last), func(ev sseEvent) error {
@@ -277,10 +278,11 @@ func (c *Client) follow(ctx context.Context, path, lastID string, fn func(sseEve
 }
 
 // retryable reports whether a failed connection is worth another try: a
-// transport error, an idle timeout, a 429 or a 5xx — not the relay saying no.
+// transport error, an idle timeout, a 429, a 5xx or an edge's 404 — not the
+// relay saying no.
 func retryable(err error) bool {
-	if _, ok := errors.AsType[*StatusError](err); ok {
-		return errors.Is(err, ErrRateLimited) || errors.Is(err, ErrMailboxFull) || errors.Is(err, ErrUnavailable)
+	if serr, ok := errors.AsType[*StatusError](err); ok {
+		return errors.Is(err, ErrRateLimited) || errors.Is(err, ErrMailboxFull) || errors.Is(err, ErrUnavailable) || serr.edgeNotFound()
 	}
 	return !errors.Is(err, ErrProtocol)
 }

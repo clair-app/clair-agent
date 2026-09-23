@@ -292,6 +292,60 @@ func TestUploadRefusals(t *testing.T) {
 	}
 }
 
+// Only the relay's own 404 names the pair: one without its `pair_not_found`
+// — an edge's, a proxy's, Vercel's DEPLOYMENT_NOT_FOUND mid-deploy — is a
+// failure like a 5xx, and a stream retries it (ADR 2026-09.32b5).
+func TestOnlyTheRelaysNotFoundNamesThePair(t *testing.T) {
+	t.Parallel()
+
+	fake := relaytest.New()
+	t.Cleanup(fake.Close)
+	var edge atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if edge.Add(-1) >= 0 {
+			w.Header().Set("X-Vercel-Error", "DEPLOYMENT_NOT_FOUND")
+			http.Error(w, "The deployment could not be found on Vercel.\n\nDEPLOYMENT_NOT_FOUND", http.StatusNotFound)
+			return
+		}
+		fake.Server.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	rec := &sleeps{}
+	client := newClient(t, fake, newIdentity(t), relay.Options{BaseURL: srv.URL, Sleep: rec.sleep, Jitter: func() float64 { return 0 }})
+	fake.AddPair(pairID, client.Key(), "phone")
+	ctx := t.Context()
+
+	edge.Store(1)
+	_, err := client.Upload(ctx, pairID, []envelope.Envelope{mkEnv(t, pairID, envelope.DirH2P, 1, 8)})
+	if !errors.Is(err, relay.ErrNotFound) || errors.Is(err, relay.ErrPairNotFound) {
+		t.Errorf("Upload through an edge 404: err = %v, want ErrNotFound without ErrPairNotFound", err)
+	}
+	_, err = client.Upload(ctx, "BBBBBBBBBBBBBBBBBBBBBB", []envelope.Envelope{mkEnv(t, "BBBBBBBBBBBBBBBBBBBBBB", envelope.DirH2P, 2, 8)})
+	if !errors.Is(err, relay.ErrPairNotFound) || !errors.Is(err, relay.ErrNotFound) {
+		t.Errorf("Upload to a pair the relay does not know: err = %v, want ErrPairNotFound and ErrNotFound", err)
+	}
+
+	fake.Inject(mkEnv(t, pairID, envelope.DirP2H, 3, 8))
+	edge.Store(2)
+	streamCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	err = client.Stream(streamCtx, pairID, "", func(_ context.Context, ev relay.Event) error {
+		if ev.Kind == relay.EventEnvelope {
+			cancel()
+		}
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stream through two edge 404s: err = %v, want it to retry and deliver", err)
+	}
+	if got := rec.waits; len(got) != 2 || got[0] != relay.BackoffInitial/2 || got[1] != relay.BackoffInitial {
+		t.Errorf("waits after two edge 404s = %v, want the backoff [%v %v]", got, relay.BackoffInitial/2, relay.BackoffInitial)
+	}
+	if err := client.Stream(ctx, "BBBBBBBBBBBBBBBBBBBBBB", "", func(context.Context, relay.Event) error { return nil }); !errors.Is(err, relay.ErrPairNotFound) {
+		t.Errorf("Stream of a pair the relay does not know: err = %v, want ErrPairNotFound at once", err)
+	}
+}
+
 // A receipt that does not account for every envelope it answers would have
 // the uploader post the same batch again at once, forever (AG-5).
 func TestUploadReceiptMustAccountForTheBatch(t *testing.T) {
