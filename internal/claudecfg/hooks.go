@@ -176,6 +176,9 @@ func Substitute(snippet []byte, port int, token, host, exe string) []byte {
 // own hooks and nothing else, and cannot route an event it is only told
 // about to the endpoint whose answer Claude Code obeys.
 func ValidateSnippet(snippet []byte, c SnippetConfig) (*ojson.Object, error) {
+	if len(snippet) > maxSnippetBytes {
+		return nil, fmt.Errorf("%w: %d bytes, over %d", ErrSnippetRejected, len(snippet), maxSnippetBytes)
+	}
 	v, err := ojson.ParseBytes(snippet)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSnippetRejected, err)
@@ -193,8 +196,8 @@ func ValidateSnippet(snippet []byte, c SnippetConfig) (*ojson.Object, error) {
 	for _, event := range hooks.Keys() {
 		groupsVal, _ := hooks.Get(event)
 		groups := ojson.AsArray(groupsVal)
-		if groups == nil {
-			return nil, fmt.Errorf("%w: %s is not an array", ErrSnippetRejected, event)
+		if len(groups) == 0 {
+			return nil, fmt.Errorf("%w: %s is not a non-empty array", ErrSnippetRejected, event)
 		}
 		out := make([]ojson.Value, 0, len(groups))
 		for _, g := range groups {
@@ -225,6 +228,9 @@ func (c SnippetConfig) rebuildGroup(event string, g ojson.Value) (*ojson.Object,
 	}
 	innerVal, _ := grp.Get("hooks")
 	inner := ojson.AsArray(innerVal)
+	if len(inner) == 0 {
+		return nil, fmt.Errorf("%w: %s has a group whose hooks are not a non-empty array", ErrSnippetRejected, event)
+	}
 	hooks := make([]ojson.Value, 0, len(inner))
 	for _, h := range inner {
 		hook, err := c.rebuildHook(event, ojson.AsObject(h))
@@ -272,6 +278,10 @@ func (c SnippetConfig) rebuildHook(event string, hook *ojson.Object) (*ojson.Obj
 		return nil, fmt.Errorf("%w: %s has a hook that is neither http nor this binary's hook-event", ErrSnippetRejected, event)
 	}
 }
+
+// maxSnippetBytes bounds a phone snippet before it is parsed: the phone's
+// own is under 4 KiB, and an envelope could carry a thousand times that.
+const maxSnippetBytes = 64 << 10
 
 // maxTimeoutSec bounds a snippet's timeouts: the phone's own maximum
 // (HooksConfig.MAX_PERMISSION_TIMEOUT_SEC) and record.MaxDecideTimeout.

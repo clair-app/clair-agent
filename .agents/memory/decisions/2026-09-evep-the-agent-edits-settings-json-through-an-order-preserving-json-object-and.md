@@ -8,7 +8,7 @@ topics: [hooks, claudecfg]
 
 # ADR 2026-09.evep — The agent edits settings.json through an order-preserving JSON object and installs clair statusline in place of the shell shim
 
-Status: Accepted (2026-09-21)
+Status: Accepted (2026-09-21); the write, the backup by rename and statusLine ownership by regexp are superseded by ADR 2026-09.y34x
 
 **What was observed.** RELAY.md §6.5 has the agent rewrite Claude Code's `settings.json` the
 way the phone's `setup.sh` does: remove every hook group whose `url` or `command` contains

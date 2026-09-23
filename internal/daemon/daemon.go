@@ -173,6 +173,18 @@ type daemon struct {
 	mu      sync.Mutex
 	clients map[string]tunnel.Relay
 	loaded  map[string]struct{}
+
+	// Snippets are installed one at a time, latest first: next is the one
+	// waiting, installing says a caller is already draining it.
+	snippetMu  sync.Mutex
+	next       *pendingSnippet
+	installing bool
+}
+
+// pendingSnippet is a phone's hooks block waiting to be installed.
+type pendingSnippet struct {
+	pairID  string
+	snippet json.RawMessage
 }
 
 func (d *daemon) defaultRelay(baseURL string, auth ed25519.PrivateKey) (tunnel.Relay, error) {
@@ -327,17 +339,42 @@ func (d *daemon) onPolicy(pairID string, policy record.Presence) {
 	}
 }
 
-// onSnippet installs a hooks block the phone sent.
+// onSnippet installs a hooks block the phone sent. Each install replaces
+// the whole Clair block, so only the latest matters: snippets that arrive
+// while one is being installed collapse into the newest, which the caller
+// already installing picks up next (AG-7).
 func (d *daemon) onSnippet(pairID string, snippet json.RawMessage) {
 	if d.opts.Installer == nil {
 		d.log.Info("snippet ignored: no installer", "pair", pairID, "bytes", len(snippet))
 		return
 	}
-	if err := d.opts.Installer.InstallSnippet(snippet); err != nil {
-		d.log.Warn("snippet not installed", "pair", pairID, "error", err.Error())
+	d.snippetMu.Lock()
+	if d.next != nil {
+		d.log.Info("snippet superseded by a newer one", "pair", d.next.pairID)
+	}
+	d.next = &pendingSnippet{pairID: pairID, snippet: snippet}
+	if d.installing {
+		d.snippetMu.Unlock()
 		return
 	}
-	d.log.Info("hooks rewritten from the phone's snippet; restart Claude Code", "pair", pairID)
+	d.installing = true
+	for d.next != nil {
+		p := d.next
+		d.next = nil
+		d.snippetMu.Unlock()
+		d.installSnippet(p)
+		d.snippetMu.Lock()
+	}
+	d.installing = false
+	d.snippetMu.Unlock()
+}
+
+func (d *daemon) installSnippet(p *pendingSnippet) {
+	if err := d.opts.Installer.InstallSnippet(p.snippet); err != nil {
+		d.log.Warn("snippet not installed", "pair", p.pairID, "error", err.Error())
+		return
+	}
+	d.log.Info("hooks rewritten from the phone's snippet; restart Claude Code", "pair", p.pairID)
 }
 
 // onRevoked forgets a pair the phone or the relay ended; with no pair left

@@ -417,35 +417,46 @@ func notFound(name string, err error) error {
 	return fmt.Errorf("state: read %s: %w", name, err)
 }
 
-// write replaces a file atomically: a fresh temp name in the same directory,
-// 0600, synced, then renamed over the target.
+// write replaces a file in the directory atomically, 0600.
 func (d *Dir) write(name string, data []byte) error {
-	target := filepath.Join(d.path, name)
+	return WriteFile(filepath.Join(d.path, name), data, 0o600)
+}
+
+// WriteFile replaces path atomically: a fresh random temp name in the same
+// directory, created exclusively (so a planted file or symlink at a temp name
+// is never followed), given perm whatever the umask, synced, then renamed
+// over path. A symlink at path itself is replaced, not followed; resolve it
+// first to write through it.
+func WriteFile(path string, data []byte, perm os.FileMode) error {
 	var suffix [4]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return fmt.Errorf("state: temp name: %w", err)
 	}
-	tmp := target + ".tmp-" + hex.EncodeToString(suffix[:])
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp := path + ".tmp-" + hex.EncodeToString(suffix[:])
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
-		return fmt.Errorf("state: create %s: %w", name, err)
+		return fmt.Errorf("state: create %s: %w", tmp, err)
+	}
+	fail := func(what string, err error) error {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("state: %s %s: %w", what, path, err)
+	}
+	if err = f.Chmod(perm); err != nil {
+		return fail("chmod", err)
 	}
 	if _, err = f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("state: write %s: %w", name, err)
+		return fail("write", err)
 	}
 	if err = f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("state: sync %s: %w", name, err)
+		return fail("sync", err)
 	}
 	if err = f.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("state: close %s: %w", name, err)
+		return fmt.Errorf("state: close %s: %w", path, err)
 	}
 	for attempt := range renameRetries {
-		err = os.Rename(tmp, target)
+		err = os.Rename(tmp, path)
 		if err == nil || runtime.GOOS != "windows" || attempt == renameRetries-1 {
 			break
 		}
@@ -453,7 +464,7 @@ func (d *Dir) write(name string, data []byte) error {
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("state: replace %s: %w", name, err)
+		return fmt.Errorf("state: replace %s: %w", path, err)
 	}
 	return nil
 }

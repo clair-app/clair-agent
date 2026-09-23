@@ -52,7 +52,7 @@ What is in `go.mod` and why:
 | `golang.org/x/crypto` | `internal/envelope` (`chacha20poly1305.NewX`) | XChaCha20-Poly1305 is not in `crypto/*` (RELAY.md §5.3) |
 | `golang.org/x/term` | `internal/pairing` (`IsTerminal`) | telling a controlling terminal from a pipe |
 | `rsc.io/qr` | `internal/pairing` | no QR encoder in the standard library (ADR 2026-09.zhzc) |
-| `golang.org/x/sys` | indirect, via `x/crypto` | — |
+| `golang.org/x/sys` | `internal/claudecfg` on Windows (`LockFileEx`); also via `x/crypto` | `syscall` has no `LockFileEx` for the `settings.json` lock (ADR 2026-09.y34x) |
 
 To add one:
 

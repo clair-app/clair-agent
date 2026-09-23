@@ -59,12 +59,18 @@ func (o *Object) Keys() []string { return slices.Clone(o.keys) }
 // Len is the number of members.
 func (o *Object) Len() int { return len(o.keys) }
 
-// Parse reads one JSON value; trailing data is an error. A duplicate key
-// keeps its first position and its last value.
+// MaxDepth bounds how deeply objects and arrays may nest. Claude Code's
+// settings nest a few levels; a deeper document is refused rather than
+// recursed into, and re-indented, level by level.
+const MaxDepth = 64
+
+// Parse reads one JSON value; trailing data is an error, and so is nesting
+// deeper than MaxDepth. A duplicate key keeps its first position and its
+// last value.
 func Parse(r io.Reader) (Value, error) {
 	dec := json.NewDecoder(r)
 	dec.UseNumber()
-	v, err := parseValue(dec)
+	v, err := parseValue(dec, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -79,13 +85,16 @@ func ParseBytes(b []byte) (Value, error) {
 	return Parse(bytes.NewReader(b))
 }
 
-func parseValue(dec *json.Decoder) (Value, error) {
+func parseValue(dec *json.Decoder, depth int) (Value, error) {
 	tok, err := dec.Token()
 	if err != nil {
 		return nil, fmt.Errorf("ojson: %w", err)
 	}
 	switch t := tok.(type) {
 	case json.Delim:
+		if depth >= MaxDepth {
+			return nil, fmt.Errorf("ojson: nested deeper than %d", MaxDepth)
+		}
 		switch t {
 		case '{':
 			obj := NewObject()
@@ -98,7 +107,7 @@ func parseValue(dec *json.Decoder) (Value, error) {
 				if !ok {
 					return nil, fmt.Errorf("ojson: object key %v is not a string", keyTok)
 				}
-				val, err := parseValue(dec)
+				val, err := parseValue(dec, depth+1)
 				if err != nil {
 					return nil, err
 				}
@@ -111,7 +120,7 @@ func parseValue(dec *json.Decoder) (Value, error) {
 		case '[':
 			arr := []Value{}
 			for dec.More() {
-				val, err := parseValue(dec)
+				val, err := parseValue(dec, depth+1)
 				if err != nil {
 					return nil, err
 				}

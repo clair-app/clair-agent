@@ -24,6 +24,11 @@ const (
 	statuslineInterval    = 30 * time.Second
 	statuslinePostTimeout = 2 * time.Second
 	maxStatuslineInput    = 4 << 20
+	// EnvStatuslineNested is set for the user's original statusline command.
+	// A `clair statusline` that finds it set is running inside another one,
+	// so it runs no original of its own: whatever the saved original turned
+	// out to be, the chain ends there (AG-6).
+	EnvStatuslineNested = "CLAIR_STATUSLINE_NESTED"
 )
 
 // StatuslineOptions configure one run of `clair statusline`.
@@ -33,6 +38,12 @@ type StatuslineOptions struct {
 	Stderr io.Writer
 	// SettingsPath locates the saved original statusLine beside it.
 	SettingsPath string
+	// Exe is this binary's path: an original that runs its statusline is
+	// never run.
+	Exe string
+	// Nested says EnvStatuslineNested was set: this run is some statusline's
+	// original, and runs no original and posts nothing.
+	Nested bool
 	// AgentURL is the daemon's loopback origin; empty skips the POST.
 	AgentURL string
 	Token    string
@@ -54,6 +65,9 @@ type StatuslineOptions struct {
 // runs the user's original command with the same input, passing its output
 // and exit status through. It prints nothing of its own.
 func RunStatusline(ctx context.Context, o StatuslineOptions) int {
+	if o.Nested {
+		return 0
+	}
 	now := o.Now
 	if now == nil {
 		now = time.Now
@@ -88,7 +102,7 @@ func RunStatusline(ctx context.Context, o StatuslineOptions) int {
 	}
 
 	code := 0
-	if command := commandOf(Installer{SettingsPath: o.SettingsPath}.loadOriginal()); command != "" {
+	if command := commandOf(Installer{SettingsPath: o.SettingsPath, ClairExe: o.Exe}.loadOriginal()); command != "" {
 		run := o.RunOriginal
 		if run == nil {
 			run = runShell
@@ -158,6 +172,7 @@ func post(ctx context.Context, o StatuslineOptions, input []byte) {
 // returns its exit status.
 func runShell(ctx context.Context, command string, stdin []byte, stdout, stderr io.Writer) (int, error) {
 	cmd := shellCommand(ctx, command)
+	cmd.Env = append(os.Environ(), EnvStatuslineNested+"=1")
 	cmd.Stdin = bytes.NewReader(stdin)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

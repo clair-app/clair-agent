@@ -190,6 +190,11 @@ func TestValidateSnippetRejects(t *testing.T) {
 		{"hooks not object", `{"hooks":[]}`},
 		{"group not object", `{"hooks":{"Stop":["x"]}}`},
 		{"event not array", `{"hooks":{"Stop":{}}}`},
+		{"event an empty array", `{"hooks":{"Stop":[]}}`},
+		{"group without hooks", `{"hooks":{"Stop":[{"matcher":"x"}]}}`},
+		{"group with empty hooks", `{"hooks":{"Stop":[{"hooks":[]}]}}`},
+		{"over the size cap", `{"hooks":{"Stop":[{"hooks":[` + http(event) + `]}]},"x":"` + strings.Repeat("x", maxSnippetBytes) + `"}`},
+		{"nested past the depth cap", `{"hooks":{"Stop":[{"hooks":[` + http(event) + `]}]},"x":` + strings.Repeat("[", ojson.MaxDepth) + strings.Repeat("]", ojson.MaxDepth) + `}`},
 		{"hook not object", `{"hooks":{"Stop":[{"hooks":[1]}]}}`},
 		{"not json", `{`},
 		{"not an object", `[]`},
@@ -213,16 +218,22 @@ func TestIsOurStatusLine(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]bool{
-		"/opt/clair/clair statusline":            true,
-		"'/opt/my tools/clair' statusline":       true,
-		`"C:/Users/w/clair.exe" statusline`:      true,
-		"C:/Users/w/clair.exe  statusline":       true,
-		"sh /home/w/.claude/clair-statusline.sh": true,
-		"/opt/clair/clair status":                false,
-		"/opt/clair/clairstatusline":             false,
-		"claircode statusline":                   false,
-		"printf 'ok'":                            false,
-		"":                                       false,
+		"/opt/clair/clair statusline":                   true,
+		"'/opt/my tools/clair' statusline":              true,
+		`'/opt/it'"'"'s/clair' statusline`:              true,
+		`"C:/Users/w/clair.exe" statusline`:             true,
+		"C:/Users/w/clair.exe  statusline":              true,
+		`C:\Users\w\clair-windows-amd64.exe statusline`: true,
+		"/usr/local/bin/clair-linux-amd64 statusline":   true,
+		"/opt/clair-agent statusline":                   true,
+		"sh /home/w/.claude/clair-statusline.sh":        true,
+		"/opt/clair/clair status":                       false,
+		"/opt/clair/clair statusline --x":               false,
+		"/opt/clair/clairstatusline":                    false,
+		"claircode statusline":                          false,
+		"'/opt/clair/clair statusline":                  false,
+		"printf 'ok'":                                   false,
+		"":                                              false,
 	}
 	for cmd, want := range tests {
 		if got := IsOurStatusLine(cmd); got != want {
@@ -481,6 +492,147 @@ func TestInstallRefusesANonObjectSettingsFile(t *testing.T) {
 	}
 	if got := backups(t, in); len(got) != 0 {
 		t.Error("a refused install left a backup")
+	}
+}
+
+// Concurrent installs and uninstalls — the daemon's snippets racing `clair
+// pair` or `clair unpair` — each see the others' writes: nothing the user
+// wrote is lost and the file is never missing or torn (AG-7).
+func TestConcurrentInstallsKeepTheUsersSettings(t *testing.T) {
+	t.Parallel()
+
+	in := fixture(t, `{"permissions":{"deny":["Bash(rm:*)"]},"statusLine":{"type":"command","command":"printf ok"}}`)
+	const workers, rounds = 4, 25
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			for r := range rounds {
+				var err error
+				if (w+r)%3 == 0 {
+					_, err = in.Uninstall()
+				} else {
+					_, err = in.Install(defaultHooks())
+				}
+				if err != nil {
+					t.Errorf("worker %d round %d: %v", w, r, err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	s := readSettings(t, in)
+	if got := compact(t, mustGet(t, s, "permissions")); got != `{"deny":["Bash(rm:*)"]}` {
+		t.Errorf("permissions = %s, want the user's deny rule kept", got)
+	}
+	if _, err := in.Install(defaultHooks()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := in.Uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	if got := compact(t, mustGet(t, readSettings(t, in), "statusLine")); got != `{"type":"command","command":"printf ok"}` {
+		t.Errorf("statusLine after the storm and an uninstall = %s, want the user's own back", got)
+	}
+}
+
+// selfExe makes a stand-in for this binary under a release artifact's name
+// or another, in its own directory.
+func selfExe(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A second install must never save the agent's own statusLine as the
+// user's, whatever the binary is called: `clair statusline` would then run
+// itself, and every refresh would fork without end (AG-6).
+func TestSecondInstallNeverSavesOurOwnStatusLine(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"clair-linux-amd64", "cl"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			in := fixture(t, `{"statusLine":{"type":"command","command":"printf ok"}}`)
+			in.ClairExe = selfExe(t, name)
+			for range 2 {
+				if _, err := in.Install(defaultHooks()); err != nil {
+					t.Fatalf("Install: %v", err)
+				}
+			}
+			if got := commandOf(in.loadOriginal()); got != "printf ok" {
+				t.Errorf("saved original = %q, want the user's printf ok", got)
+			}
+			// Another spelling of the same file is still ours.
+			linked := filepath.Join(t.TempDir(), "other-name")
+			if err := os.Symlink(in.ClairExe, linked); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+			if !in.isOurs(StatusLineCommand(linked)) {
+				t.Errorf("isOurs(%q) = false, want true: it runs this binary", StatusLineCommand(linked))
+			}
+		})
+	}
+}
+
+// An original already poisoned by an older install is neither run nor
+// restored, and a nested run runs no original at all.
+func TestRunStatuslineNeverRunsItself(t *testing.T) {
+	t.Parallel()
+
+	exe := selfExe(t, "cl")
+	var ran []string
+	var mu sync.Mutex
+	runOriginal := func(_ context.Context, command string, _ []byte, _, _ io.Writer) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		ran = append(ran, command)
+		return 0, nil
+	}
+	for _, tt := range []struct {
+		name     string
+		original string
+		nested   bool
+	}{
+		{name: "itself under another name", original: StatusLineCommand(exe)},
+		{name: "a release build", original: "/usr/local/bin/clair-linux-amd64 statusline"},
+		{name: "any original when nested", original: "printf ok", nested: true},
+	} {
+		in := fixture(t, "")
+		saved, merr := json.Marshal(map[string]string{"type": "command", "command": tt.original})
+		if merr != nil {
+			t.Fatal(merr)
+		}
+		if err := os.WriteFile(in.originalPath(), saved, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code := RunStatusline(t.Context(), StatuslineOptions{
+			Stdin: strings.NewReader("{}"), SettingsPath: in.SettingsPath, Exe: exe, Nested: tt.nested,
+			TempDir: t.TempDir(), RunOriginal: runOriginal,
+		})
+		if code != 0 {
+			t.Errorf("%s: exit %d, want 0", tt.name, code)
+		}
+		if tt.nested {
+			continue
+		}
+		// Uninstall does not put the poisoned original back either.
+		in.ClairExe = exe
+		if err := os.WriteFile(in.SettingsPath, []byte(`{"statusLine":{"type":"command","command":"`+StatusLineCommand(exe)+`"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		report, err := in.Uninstall()
+		if err != nil || report.StatusLine != "removed" {
+			t.Errorf("%s: Uninstall = %+v, %v; want the statusLine removed", tt.name, report, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ran) != 0 {
+		t.Errorf("ran originals %q, want none", ran)
 	}
 }
 

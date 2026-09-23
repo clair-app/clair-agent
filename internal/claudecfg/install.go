@@ -8,11 +8,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"claircode.app/clair-agent/internal/ojson"
+	"claircode.app/clair-agent/internal/state"
 )
 
 const (
@@ -25,11 +25,13 @@ const (
 	EnvConfigDir = "CLAUDE_CONFIG_DIR"
 	settingsFile = "settings.json"
 	indent       = "  "
+	// Every rewrite holds an advisory lock on settings.json plus lockSuffix;
+	// the lock file itself is never removed.
+	lockSuffix = ".lock"
+	// A settings.json the agent creates gets newFileMode, as it holds the
+	// hook bearer. An existing file keeps its own mode.
+	newFileMode = 0o600
 )
-
-// ourStatusLine matches a statusLine command that runs this binary's
-// statusline subcommand, however the path was quoted.
-var ourStatusLine = regexp.MustCompile(`clair(\.exe)?['"]?\s+statusline\b`)
 
 // SettingsPath is `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json`.
 func SettingsPath(getenv func(string) string, home func() (string, error)) (string, error) {
@@ -43,10 +45,73 @@ func SettingsPath(getenv func(string) string, home func() (string, error)) (stri
 	return filepath.Join(h, ".claude", settingsFile), nil
 }
 
-// IsOurStatusLine reports whether a statusLine command is the agent's, or
-// the LAN installer's shell shim.
+// IsOurStatusLine reports whether a statusLine command is a Clair agent's,
+// by its shape alone: `<clair binary> statusline`, where the binary is named
+// clair or clair-<anything> (a release build is clair-<os>-<arch>), or the
+// LAN installer's shell shim. Installer.isOurs also knows this binary's own
+// path, whatever it is named.
 func IsOurStatusLine(command string) bool {
-	return ourStatusLine.MatchString(command) || strings.Contains(command, legacyShim)
+	if strings.Contains(command, legacyShim) {
+		return true
+	}
+	exe, rest := splitCommand(command)
+	return rest == "statusline" && isClairName(exe)
+}
+
+// runsStatuslineOf reports whether command is `<exe> statusline` for the
+// same file as exe, however it was spelt or linked.
+func runsStatuslineOf(command, exe string) bool {
+	if exe == "" {
+		return false
+	}
+	first, rest := splitCommand(command)
+	if rest != "statusline" || first == "" {
+		return false
+	}
+	a, err := os.Stat(first) //nolint:gosec // only compared with our own executable, never opened
+	if err != nil {
+		return false
+	}
+	b, err := os.Stat(exe)
+	return err == nil && os.SameFile(a, b)
+}
+
+// isClairName reports whether a path's base name is clair's: `clair`, or
+// `clair` then one of `-`, `_` or `.` and anything, with or without `.exe`.
+func isClairName(path string) bool {
+	base := path[strings.LastIndexAny(path, `/\`)+1:]
+	base = strings.TrimSuffix(strings.TrimSuffix(base, ".exe"), ".EXE")
+	if base == "clair" {
+		return true
+	}
+	rest, ok := strings.CutPrefix(base, "clair")
+	return ok && rest != "" && strings.ContainsRune("-_.", rune(rest[0]))
+}
+
+// splitCommand splits a command into its first shell word, unquoted, and the
+// rest, trimmed. It reads the quoting quoteForShell writes on either platform
+// — '…' runs (a quote inside is '"'"'), "…" runs — and nothing fancier; an
+// unbalanced quote gives no word.
+func splitCommand(command string) (first, rest string) {
+	s := strings.TrimLeft(command, " \t")
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		switch c := s[i]; c {
+		case ' ', '\t':
+			return b.String(), strings.TrimSpace(s[i:])
+		case '\'', '"':
+			j := strings.IndexByte(s[i+1:], c)
+			if j < 0 {
+				return "", ""
+			}
+			b.WriteString(s[i+1 : i+1+j])
+			i += j + 2
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String(), ""
 }
 
 // Installer edits one settings.json.
@@ -72,96 +137,168 @@ type Report struct {
 
 // Install merges a hooks block and wraps the statusLine.
 func (in Installer) Install(hooks *ojson.Object) (Report, error) {
-	settings, err := in.load()
-	if err != nil {
-		return Report{}, err
-	}
-	mergeHooks(settings, hooks)
-	var report Report
-	report.StatusLine, err = in.wrapStatusLine(settings)
-	if err != nil {
-		return Report{}, err
-	}
-	report.Backup, err = in.save(settings)
-	return report, err
+	return in.edit(func(settings *ojson.Object) (string, error) {
+		mergeHooks(settings, hooks)
+		return in.wrapStatusLine(settings)
+	})
 }
 
 // Uninstall removes every Clair hook group and restores the statusLine.
 func (in Installer) Uninstall() (Report, error) {
-	settings, err := in.load()
+	return in.edit(func(settings *ojson.Object) (string, error) {
+		mergeHooks(settings, ojson.NewObject())
+		return in.unwrapStatusLine(settings), nil
+	})
+}
+
+// current is settings.json as read: the file a symlink at SettingsPath
+// resolves to, its bytes and mode, and whether it existed.
+type current struct {
+	target string
+	data   []byte
+	mode   fs.FileMode
+	exists bool
+}
+
+// edit runs one read-modify-write of settings.json under the lock beside
+// it, so concurrent installs — the daemon's snippets, `clair pair`, `clair
+// unpair` — never lose each other's changes or the user's (ADR 2026-09.y34x).
+func (in Installer) edit(change func(*ojson.Object) (string, error)) (Report, error) {
+	unlock, err := in.lock()
 	if err != nil {
 		return Report{}, err
 	}
-	mergeHooks(settings, ojson.NewObject())
+	defer unlock()
+	cur, settings, err := in.load()
+	if err != nil {
+		return Report{}, err
+	}
 	var report Report
-	report.StatusLine = in.unwrapStatusLine(settings)
-	report.Backup, err = in.save(settings)
+	if report.StatusLine, err = change(settings); err != nil {
+		return Report{}, err
+	}
+	report.Backup, err = in.save(cur, settings)
 	return report, err
 }
 
-// load reads settings.json; a missing file is an empty object, anything but
-// an object is refused.
-func (in Installer) load() (*ojson.Object, error) {
-	data, err := os.ReadFile(in.SettingsPath)
+// lock takes the advisory lock beside settings.json, creating its directory
+// with Claude Code's default mode if need be.
+func (in Installer) lock() (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(in.SettingsPath), 0o755); err != nil { //nolint:gosec // Claude Code's own directory; its default mode
+		return nil, fmt.Errorf("claudecfg: create %s: %w", filepath.Dir(in.SettingsPath), err)
+	}
+	path := in.SettingsPath + lockSuffix
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("claudecfg: open %s: %w", path, err)
+	}
+	if err := lockFile(f); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("claudecfg: lock %s: %w", path, err)
+	}
+	return func() {
+		_ = unlockFile(f)
+		_ = f.Close()
+	}, nil
+}
+
+// load reads settings.json, through a symlink; a missing file is an empty
+// object, anything but an object is refused.
+func (in Installer) load() (current, *ojson.Object, error) {
+	cur := current{target: in.SettingsPath, mode: newFileMode}
+	if target, err := filepath.EvalSymlinks(in.SettingsPath); err == nil {
+		cur.target = target
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return cur, nil, fmt.Errorf("claudecfg: resolve %s: %w", in.SettingsPath, err)
+	}
+	data, err := os.ReadFile(cur.target)
 	if errors.Is(err, fs.ErrNotExist) {
-		return ojson.NewObject(), nil
+		return cur, ojson.NewObject(), nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("claudecfg: read %s: %w", in.SettingsPath, err)
+		return cur, nil, fmt.Errorf("claudecfg: read %s: %w", in.SettingsPath, err)
 	}
+	info, err := os.Stat(cur.target)
+	if err != nil {
+		return cur, nil, fmt.Errorf("claudecfg: stat %s: %w", in.SettingsPath, err)
+	}
+	cur.data, cur.mode, cur.exists = data, info.Mode().Perm(), true
 	v, err := ojson.ParseBytes(data)
 	if err != nil {
-		return nil, fmt.Errorf("claudecfg: %s: %w", in.SettingsPath, err)
+		return cur, nil, fmt.Errorf("claudecfg: %s: %w", in.SettingsPath, err)
 	}
 	obj := ojson.AsObject(v)
 	if obj == nil {
-		return nil, fmt.Errorf("claudecfg: %s is not a JSON object; not touching it", in.SettingsPath)
+		return cur, nil, fmt.Errorf("claudecfg: %s is not a JSON object; not touching it", in.SettingsPath)
 	}
-	return obj, nil
+	return cur, obj, nil
 }
 
-// save backs the old file up by rename, then writes the new one atomically.
-func (in Installer) save(settings *ojson.Object) (string, error) {
-	now := in.Now
-	if now == nil {
-		now = time.Now
-	}
-	backup := ""
-	if _, err := os.Stat(in.SettingsPath); err == nil {
-		backup = in.SettingsPath + ".bak-" + now().Format("20060102150405")
-		for i := 1; ; i++ {
-			if _, err := os.Stat(backup); errors.Is(err, fs.ErrNotExist) {
-				break
-			}
-			backup = fmt.Sprintf("%s.bak-%s-%d", in.SettingsPath, now().Format("20060102150405"), i)
-		}
-		if err := os.Rename(in.SettingsPath, backup); err != nil {
-			return "", fmt.Errorf("claudecfg: back up %s: %w", in.SettingsPath, err)
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(in.SettingsPath), 0o755); err != nil { //nolint:gosec // Claude Code's own directory; its default mode
-		return "", fmt.Errorf("claudecfg: create %s: %w", filepath.Dir(in.SettingsPath), err)
-	}
+// save backs the old file up by copy — so settings.json never goes missing,
+// even for a moment — then replaces it atomically with its own mode kept.
+func (in Installer) save(cur current, settings *ojson.Object) (string, error) {
 	data, err := ojson.Marshal(settings, indent)
 	if err != nil {
 		return "", fmt.Errorf("claudecfg: encode settings: %w", err)
 	}
-	tmp := in.SettingsPath + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil { //nolint:gosec // settings.json is not a secret; Claude Code writes it 0644 too
-		return "", fmt.Errorf("claudecfg: write %s: %w", tmp, err)
+	backup := ""
+	if cur.exists {
+		if backup, err = in.backup(cur); err != nil {
+			return "", err
+		}
 	}
-	if err := os.Rename(tmp, in.SettingsPath); err != nil {
-		_ = os.Remove(tmp)
-		return "", fmt.Errorf("claudecfg: replace %s: %w", in.SettingsPath, err)
+	if err := state.WriteFile(cur.target, append(data, '\n'), cur.mode); err != nil {
+		return "", fmt.Errorf("claudecfg: %w", err)
 	}
 	return backup, nil
+}
+
+// backup writes the old bytes to settings.json.bak-<stamp>[-n], created
+// exclusively with the old file's mode.
+func (in Installer) backup(cur current) (string, error) {
+	now := in.Now
+	if now == nil {
+		now = time.Now
+	}
+	stamp := in.SettingsPath + ".bak-" + now().Format("20060102150405")
+	for i := 0; ; i++ {
+		path := stamp
+		if i > 0 {
+			path = fmt.Sprintf("%s-%d", stamp, i)
+		}
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, cur.mode)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("claudecfg: back up %s: %w", in.SettingsPath, err)
+		}
+		_, err = f.Write(cur.data)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			_ = os.Remove(path)
+			return "", fmt.Errorf("claudecfg: back up %s: %w", in.SettingsPath, err)
+		}
+		return path, nil
+	}
+}
+
+// isOurs reports whether a statusLine command is the agent's: by shape
+// (IsOurStatusLine), or because it runs this very binary's statusline under
+// any name.
+func (in Installer) isOurs(command string) bool {
+	return IsOurStatusLine(command) || runsStatuslineOf(command, in.ClairExe)
 }
 
 func (in Installer) originalPath() string {
 	return filepath.Join(filepath.Dir(in.SettingsPath), originalFile)
 }
 
-// loadOriginal reads the saved statusLine; nil when absent or unreadable.
+// loadOriginal reads the saved statusLine; nil when absent, unreadable, or
+// itself a Clair statusline — running that would have the statusline run
+// itself, without end (AG-6).
 func (in Installer) loadOriginal() ojson.Value {
 	data, err := os.ReadFile(in.originalPath())
 	if err != nil {
@@ -169,6 +306,9 @@ func (in Installer) loadOriginal() ojson.Value {
 	}
 	v, err := ojson.ParseBytes(data)
 	if err != nil {
+		return nil
+	}
+	if in.isOurs(commandOf(v)) {
 		return nil
 	}
 	return v
@@ -189,7 +329,7 @@ func commandOf(status ojson.Value) string {
 func (in Installer) wrapStatusLine(settings *ojson.Object) (string, error) {
 	status, _ := settings.Get("statusLine")
 	var original ojson.Value
-	if IsOurStatusLine(commandOf(status)) {
+	if in.isOurs(commandOf(status)) {
 		original = in.loadOriginal()
 	} else {
 		original = status
@@ -207,8 +347,8 @@ func (in Installer) wrapStatusLine(settings *ojson.Object) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("claudecfg: encode the original statusLine: %w", err)
 	}
-	if err := os.WriteFile(in.originalPath(), append(saved, '\n'), 0o644); err != nil { //nolint:gosec // beside settings.json, same mode
-		return "", fmt.Errorf("claudecfg: write %s: %w", in.originalPath(), err)
+	if err := state.WriteFile(in.originalPath(), append(saved, '\n'), newFileMode); err != nil {
+		return "", fmt.Errorf("claudecfg: %w", err)
 	}
 	wrapped := ojson.NewObject()
 	wrapped.Set("type", "command")
@@ -227,7 +367,7 @@ func (in Installer) wrapStatusLine(settings *ojson.Object) (string, error) {
 func (in Installer) unwrapStatusLine(settings *ojson.Object) string {
 	result := "none"
 	status, _ := settings.Get("statusLine")
-	if IsOurStatusLine(commandOf(status)) {
+	if in.isOurs(commandOf(status)) {
 		if original := in.loadOriginal(); original == nil {
 			settings.Delete("statusLine")
 			result = "removed"

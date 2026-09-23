@@ -26,4 +26,5 @@ number" and all take it — so nobody picks one. Cite the id an ADR carries; nev
 | [2026-09.ut2g](decisions/2026-09-ut2g-a-phone-snippet-is-rebuilt-from-the-agent-s-own-hook-template.md) | A phone snippet is rebuilt from the agent's own hook template, with each event pinned to its endpoint | hooks, security |
 | [2026-09.vnj9](decisions/2026-09-vnj9-tests-are-the-standard-library-and-golden-vectors.md) | Tests are the standard library and golden vectors, not an assertion framework | testing, toolchain |
 | [2026-09.w4ww](decisions/2026-09-w4ww-the-agent-answers-a-held-decide-only-with-what-the-permissionrequest-allows.md) | The agent answers a held decide only with what the PermissionRequest allows, checked against the request | hooks, security, tunnel |
+| [2026-09.y34x](decisions/2026-09-y34x-settings-json-is-rewritten-under-a-file-lock.md) | settings.json is rewritten under a file lock, keeping its mode, and backed up by copy | hooks, claudecfg |
 | [2026-09.zhzc](decisions/2026-09-zhzc-the-qr-is-rendered-with-rsc-io-qr-and-drawn-in-half-blocks-by-the-agent.md) | The QR is rendered with rsc.io/qr and drawn in half-blocks by the agent | pairing, dependencies |

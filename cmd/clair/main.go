@@ -301,7 +301,13 @@ func cmdStatusline(ctx context.Context, d deps, args []string, stdout, stderr io
 		fmt.Fprintf(stderr, "clair statusline: %v\n", err)
 		return exitError
 	}
-	opts := claudecfg.StatuslineOptions{Stdin: d.stdin, Stdout: stdout, Stderr: stderr, SettingsPath: settings, Now: d.now, Host: hostname.Local()}
+	opts := claudecfg.StatuslineOptions{
+		Stdin: d.stdin, Stdout: stdout, Stderr: stderr, SettingsPath: settings, Now: d.now, Host: hostname.Local(),
+		Nested: d.getenv(claudecfg.EnvStatuslineNested) != "",
+	}
+	if exe, err := d.exe(); err == nil {
+		opts.Exe = exe
+	}
 	// Without an agent.json there is nothing to forward to; the user's own
 	// statusline still runs. Never create the config directory from here.
 	if path := cfg.dir; path != "" {
