@@ -54,8 +54,7 @@ var (
 	idPattern     = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 	keyPattern    = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 	lastIDPattern = regexp.MustCompile(`^\d{1,15}$`)
-	// FCM's token alphabet, as the relay checks it (`^[A-Za-z0-9_:.-]{1,1024}$`;
-	// RE2 caps a repeat at 1000, so the length is checked apart).
+	// FCM's token alphabet, as the relay checks it; the length is apart.
 	pushTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_:.-]+$`)
 )
 

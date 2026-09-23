@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"math"
 	"mime"
 	"net/http"
 	"net/http/httptest"
@@ -34,7 +33,7 @@ import (
 )
 
 // specPath is the relay's OpenAPI 3.1 document, copied unchanged from
-// clair-server commit d74f7a7 (`openapi.json` at its root; the relay serves it
+// clair-server commit 556d99f (`openapi.json` at its root; the relay serves it
 // at /openapi.json). A refresh replaces the file and this commit together. A
 // check that then fails is drift between the relay and this client or the
 // fake, never a reason to edit the copy.
@@ -749,11 +748,11 @@ func hasType(v any, name string) bool {
 
 func validateString(s schema, v, at string) error {
 	if p, ok := s["pattern"].(string); ok {
-		re, minLen, maxLen, err := compilePattern(p)
+		re, err := regexp.Compile(p)
 		if err != nil {
 			return fmt.Errorf("%s: pattern %q: %w", at, p, err)
 		}
-		if n := utf8.RuneCountInString(v); !re.MatchString(v) || n < minLen || n > maxLen {
+		if !re.MatchString(v) {
 			return fmt.Errorf("%s: %.40q does not match %s", at, v, p)
 		}
 	}
@@ -769,29 +768,6 @@ func validateString(s schema, v, at string) error {
 		}
 	}
 	return nil
-}
-
-// boundedClass is a whole-string pattern of one character class repeated
-// {m,n} times, the one shape the relay uses past RE2's 1000-repeat cap
-// (the push token's {1,1024}).
-var boundedClass = regexp.MustCompile(`^\^(\[[^\]]+\])\{(\d+),(\d+)\}\$$`)
-
-// compilePattern compiles a schema pattern. A boundedClass pattern RE2
-// refuses becomes the class repeated freely plus rune-length bounds, which
-// is the same language; anything else RE2 refuses fails loudly.
-func compilePattern(p string) (re *regexp.Regexp, minLen, maxLen int, err error) {
-	re, err = regexp.Compile(p)
-	if err == nil {
-		return re, 0, math.MaxInt, nil
-	}
-	m := boundedClass.FindStringSubmatch(p)
-	if m == nil {
-		return nil, 0, 0, err
-	}
-	minLen, _ = strconv.Atoi(m[2])
-	maxLen, _ = strconv.Atoi(m[3])
-	re, err = regexp.Compile("^" + m[1] + "*$")
-	return re, minLen, maxLen, err
 }
 
 func validateNumber(s schema, v json.Number, at string) error {
