@@ -218,12 +218,11 @@ func simulate(ctx context.Context, o options, stdout io.Writer) error {
 		revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		// The sealed record is what ends the pair on the host; the DELETE
-		// alone only parks it there (agent ADR 2026-09.9ufb). The DELETE
-		// purges the mailbox, so give the host a moment to read the record.
+		// alone only parks it there (agent ADR 2026-09.9ufb). The relay
+		// keeps what the revoker sent for the other side to drain (RELAY.md
+		// r9 §6.6), so the DELETE follows once the upload is taken.
 		if rec, sealErr := seal(record.Record{Kind: record.KindControl, Control: record.ControlRevoke}, pairID); sealErr == nil {
-			if _, upErr := client.Upload(revokeCtx, pairID, []envelope.Envelope{rec}); upErr == nil {
-				_ = sleepCtx(revokeCtx, 2*time.Second)
-			}
+			_, _ = client.Upload(revokeCtx, pairID, []envelope.Envelope{rec})
 		}
 		if rerr := client.Revoke(revokeCtx, pairID); rerr == nil {
 			fmt.Fprintln(stdout, "revoked the pair")
@@ -308,16 +307,4 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
-}
-
-// sleepCtx waits for d or the context.
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
