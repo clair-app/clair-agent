@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -240,7 +241,9 @@ func TestBackoff(t *testing.T) {
 func TestSSEReader(t *testing.T) {
 	t.Parallel()
 
-	type ev = sseEvent
+	// ev is an event as the test writes it; data is compared as a string.
+	type ev struct{ name, id, data string }
+	manyLines := strings.Repeat("data: "+strings.Repeat("x", 1<<10)+"\n", MaxSSEEventBytes>>10+1) + "\n"
 	tests := []struct {
 		name   string
 		stream string
@@ -252,59 +255,81 @@ func TestSSEReader(t *testing.T) {
 		{name: "single", stream: "event: envelope\nid: 5\ndata: {\"a\":1}\n\n", want: []ev{{name: "envelope", id: "5", data: `{"a":1}`}}, lastID: "5"},
 		{name: "multi-line data joins with newline", stream: "data: a\ndata: b\n\n", want: []ev{{data: "a\nb"}}},
 		{name: "crlf", stream: "event: x\r\ndata: y\r\n\r\n", want: []ev{{name: "x", data: "y"}}},
+		{name: "bare cr", stream: "event: x\rdata: y\r\rdata: z\r\r", want: []ev{{name: "x", data: "y"}, {data: "z"}}},
+		{name: "mixed line ends", stream: "data: a\r\ndata: b\rdata: c\n\r\n", want: []ev{{data: "a\nb\nc"}}},
 		{name: "no space after colon", stream: "data:y\n\n", want: []ev{{data: "y"}}},
 		{name: "only one leading space stripped", stream: "data:  y\n\n", want: []ev{{data: " y"}}},
 		{name: "comment-only block is skipped", stream: ": keepalive\n\nevent: e\ndata: d\n\n", want: []ev{{name: "e", data: "d"}}},
 		{name: "id on a data-less block updates the reader", stream: "id: 9\nretry: 1500\n: reconnect\n\n", want: nil, lastID: "9", retry: 1500 * time.Millisecond},
 		{name: "id persists across events", stream: "id: 1\ndata: a\n\ndata: b\n\n", want: []ev{{id: "1", data: "a"}, {id: "1", data: "b"}}, lastID: "1"},
+		{name: "empty id resets", stream: "id: 1\n\nid\ndata: a\n\n", want: []ev{{data: "a"}}},
+		{name: "non-decimal id is ignored", stream: "id: 7\n\nid: 8\x1b[2J\ndata: a\n\n", want: []ev{{id: "7", data: "a"}}, lastID: "7"},
+		{name: "signed id is ignored", stream: "id: 7\n\nid: +8\ndata: a\n\n", want: []ev{{id: "7", data: "a"}}, lastID: "7"},
+		{name: "id past int64 is ignored", stream: "id: 7\n\nid: 9999999999999999999\ndata: a\n\n", want: []ev{{id: "7", data: "a"}}, lastID: "7"},
 		{name: "field without colon is a field with empty value", stream: "data\n\n", want: []ev{{data: ""}}},
 		{name: "unknown field ignored", stream: "foo: bar\ndata: d\n\n", want: []ev{{data: "d"}}},
-		{name: "final line without newline", stream: "data: d\n\nid: 3", want: []ev{{data: "d"}}, lastID: "3"},
+		{name: "final line without a line end is dropped", stream: "data: d\n\nid: 3", want: []ev{{data: "d"}}},
 		{name: "block cut by eof is discarded", stream: "data: partial", want: nil},
 		{name: "retry not a number ignored", stream: "retry: soon\n\n", want: nil},
 		{name: "oversize line", stream: "data: " + strings.Repeat("x", MaxSSELineBytes+1) + "\n\n", err: ErrProtocol},
+		{name: "oversize event from short lines", stream: manyLines, err: ErrProtocol},
+		{name: "oversize event name", stream: "event: " + strings.Repeat("e", maxSSEEventName+1) + "\ndata: d\n\n", err: ErrProtocol},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			lines := 0
-			rd := newSSEReader(strings.NewReader(tt.stream), func() { lines++ })
-			var got []ev
-			var err error
-			for {
-				var e ev
-				e, err = rd.next()
-				if err != nil {
-					break
+		for _, oneByte := range []bool{false, true} {
+			if oneByte && len(tt.stream) > 1<<10 {
+				continue
+			}
+			name := tt.name
+			if oneByte {
+				name += "/one byte at a time"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				lines := 0
+				var r io.Reader = strings.NewReader(tt.stream)
+				if oneByte {
+					// A CR and the LF after it arrive in different reads.
+					r = iotest.OneByteReader(r)
 				}
-				got = append(got, e)
-			}
-			if tt.err != nil {
-				if !errors.Is(err, tt.err) {
-					t.Fatalf("next: err = %v, want %v", err, tt.err)
+				rd := newSSEReader(r, func() { lines++ })
+				var got []ev
+				var err error
+				for {
+					var e sseEvent
+					e, err = rd.next()
+					if err != nil {
+						break
+					}
+					got = append(got, ev{name: e.name, id: e.id, data: string(e.data)})
 				}
-				return
-			}
-			if !errors.Is(err, io.EOF) {
-				t.Fatalf("next: err = %v, want io.EOF", err)
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("events = %+v, want %+v", got, tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("event %d = %+v, want %+v", i, got[i], tt.want[i])
+				if tt.err != nil {
+					if !errors.Is(err, tt.err) {
+						t.Fatalf("next: err = %v, want %v", err, tt.err)
+					}
+					return
 				}
-			}
-			if rd.lastID != tt.lastID {
-				t.Errorf("lastID = %q, want %q", rd.lastID, tt.lastID)
-			}
-			if rd.retry != tt.retry {
-				t.Errorf("retry = %v, want %v", rd.retry, tt.retry)
-			}
-			if lines == 0 && tt.stream != "" {
-				t.Error("onLine was never called")
-			}
-		})
+				if !errors.Is(err, io.EOF) {
+					t.Fatalf("next: err = %v, want io.EOF", err)
+				}
+				if len(got) != len(tt.want) {
+					t.Fatalf("events = %+v, want %+v", got, tt.want)
+				}
+				for i := range got {
+					if got[i] != tt.want[i] {
+						t.Errorf("event %d = %+v, want %+v", i, got[i], tt.want[i])
+					}
+				}
+				if rd.lastID != tt.lastID {
+					t.Errorf("lastID = %q, want %q", rd.lastID, tt.lastID)
+				}
+				if rd.retry != tt.retry {
+					t.Errorf("retry = %v, want %v", rd.retry, tt.retry)
+				}
+				if lines == 0 && tt.stream != "" && tt.want != nil {
+					t.Error("onLine was never called")
+				}
+			})
+		}
 	}
 }

@@ -21,6 +21,9 @@ type item struct {
 	env  envelope.Envelope
 	wake envelope.Wake
 	size int
+	// reqID is the request record's id, so a decide whose envelope the
+	// relay refuses can be let go of at once (AG-17); "" for control records.
+	reqID string
 }
 
 // pair is one running pair: its queue, its held decides, its counters and
@@ -174,7 +177,11 @@ func (p *pair) sealLocked(rec record.Record, wake envelope.Wake, ttlSec int) (it
 		p.t.log.Warn("record dropped: envelope over the relay cap", "pair", p.cfg.ID, "req_id", rec.ReqID, "bytes", len(wire))
 		return item{}, errTooLarge
 	}
-	return item{env: env, wake: wake, size: len(wire)}, nil
+	it := item{env: env, wake: wake, size: len(wire)}
+	if rec.Kind == record.KindRequest {
+		it.reqID = rec.ReqID
+	}
+	return it, nil
 }
 
 // pushLocked appends an item, shedding older churn to make room (RELAY.md
@@ -211,7 +218,8 @@ func (p *pair) pushLocked(it item) {
 func (p *pair) peekLocked() []envelope.Envelope {
 	var out []envelope.Envelope
 	size := 0
-	for _, it := range p.queue {
+	for i := range p.queue {
+		it := &p.queue[i]
 		if len(out) >= p.batchN || (len(out) > 0 && size+it.size > relay.BatchMaxBytes) {
 			break
 		}
@@ -221,25 +229,31 @@ func (p *pair) peekLocked() []envelope.Envelope {
 	return out
 }
 
-// removeLocked drops the named envelopes from the queue; the caller holds p.mu.
-func (p *pair) removeLocked(ids []string) {
+// removeLocked drops the named envelopes from the queue and returns the
+// request ids they carried; the caller holds p.mu.
+func (p *pair) removeLocked(ids []string) (reqIDs []string) {
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 	gone := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		gone[id] = struct{}{}
 	}
 	kept := p.queue[:0]
-	for _, it := range p.queue {
+	for i := range p.queue {
+		it := &p.queue[i]
 		if _, ok := gone[it.env.ID]; ok {
 			p.queueBytes -= it.size
+			if it.reqID != "" {
+				reqIDs = append(reqIDs, it.reqID)
+			}
 			continue
 		}
-		kept = append(kept, it)
+		kept = append(kept, *it)
 	}
 	clear(p.queue[len(kept):])
 	p.queue = kept
+	return reqIDs
 }
 
 func (p *pair) depth() int {
@@ -260,6 +274,24 @@ func (p *pair) unregister(reqID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.holds, reqID)
+}
+
+// dropHolds lets go of the held decides whose requests will never reach the
+// phone: the last pair to do so answers "no decision" now, instead of at the
+// decide's timeout (AG-17). The phone never saw them, so no cancel follows.
+func (p *pair) dropHolds(reqIDs []string) {
+	for _, reqID := range reqIDs {
+		p.mu.Lock()
+		h, ok := p.holds[reqID]
+		if ok {
+			delete(p.holds, reqID)
+		}
+		p.mu.Unlock()
+		if ok {
+			p.t.log.Info("held decide let go: the relay refused its envelope", "pair", p.cfg.ID, "req_id", reqID)
+			h.release()
+		}
+	}
 }
 
 // resolve hands a response to its held decide; a late one is dropped.
@@ -341,14 +373,18 @@ func (p *pair) uploader(ctx context.Context) {
 				p.revoke("the relay refused the pair: " + describe(err))
 				return
 			case errors.Is(err, relay.ErrTooLarge):
+				// Halving is bounded (log2 of the batch), and a lone envelope
+				// is dropped, so this path always progresses.
+				var dropped []string
 				p.mu.Lock()
 				if len(batch) == 1 {
 					p.t.log.Warn("envelope dropped: relay says too large", "pair", p.cfg.ID, "envelope_id", batch[0].ID)
-					p.removeLocked([]string{batch[0].ID})
+					dropped = p.removeLocked([]string{batch[0].ID})
 				} else {
 					p.batchN = max(1, len(batch)/2)
 				}
 				p.mu.Unlock()
+				p.dropHolds(dropped)
 				continue
 			case errors.Is(err, relay.ErrBadRequest):
 				// Our own envelope is malformed for the relay; retrying would
@@ -358,9 +394,10 @@ func (p *pair) uploader(ctx context.Context) {
 					ids[i] = e.ID
 				}
 				p.mu.Lock()
-				p.removeLocked(ids)
+				dropped := p.removeLocked(ids)
 				p.mu.Unlock()
 				p.t.log.Error("batch dropped: relay rejected it", "pair", p.cfg.ID, "count", len(batch), "error", err.Error())
+				p.dropHolds(dropped)
 				continue
 			}
 			wait := backoff(attempt)
@@ -410,9 +447,15 @@ func (p *pair) receiver(ctx context.Context) {
 	attempt := 0
 	for {
 		p.setLink(&p.streamLink, "connected", nil)
+		began := p.t.now()
 		err := p.cfg.Relay.Stream(ctx, p.cfg.ID, "", p.handle)
 		if ctx.Err() != nil {
 			return
+		}
+		// A stream that held up for a while earned a fresh start: without
+		// this, one failure a day would creep the delay to its cap (AG-18).
+		if p.t.now().Sub(began) >= streamHealthy {
+			attempt = 0
 		}
 		if errors.Is(err, relay.ErrRevoked) || errors.Is(err, relay.ErrNotFound) {
 			p.revoke("the relay refused the pair: " + describe(err))
@@ -566,6 +609,12 @@ func (p *pair) acker(ctx context.Context) {
 			return
 		}
 		if err := p.cfg.Relay.Ack(ctx, p.cfg.ID, c); err != nil {
+			// A cursor the relay refuses outright will be refused every
+			// second forever; the next applied event brings a new one (AG-18).
+			if errors.Is(err, relay.ErrBadRequest) {
+				p.t.log.Warn("ack dropped: relay refused the cursor", "pair", p.cfg.ID, "cursor", string(c), "error", err.Error())
+				return
+			}
 			p.mu.Lock()
 			if p.pendingAck == "" {
 				p.pendingAck = c

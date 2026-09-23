@@ -40,6 +40,9 @@ const (
 	// backoffInitial to backoffMax (RELAY.md §13, draft).
 	backoffInitial = time.Second
 	backoffMax     = 60 * time.Second
+	// A stream that stayed up for streamHealthy resets the receiver's
+	// backoff (draft).
+	streamHealthy = time.Minute
 	// Acks are coalesced: the highest applied cursor is sent at most every
 	// ackInterval (§7.4, draft).
 	ackInterval = time.Second

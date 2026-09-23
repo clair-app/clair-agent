@@ -60,6 +60,10 @@ const (
 	BatchMaxBytes     = envelope.MaxEnvelopeJSON
 	// MaxSSELineBytes caps one SSE line: a `data:` line carries a whole envelope.
 	MaxSSELineBytes = envelope.MaxEnvelopeJSON + 64
+	// MaxSSEEventBytes caps one event's joined data, whatever its lines: the
+	// largest event, a pairing's `completed`, is one envelope and two short
+	// fields.
+	MaxSSEEventBytes = MaxSSELineBytes
 	// A non-streaming answer is read up to maxResponseBody (receipts are
 	// small); an error answer up to maxErrorBody, enough for its `error`.
 	maxResponseBody = 1 << 20
@@ -154,6 +158,10 @@ func New(auth ed25519.PrivateKey, opts Options) (*Client, error) {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: ResponseHeaderTimeout,
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: opts.RootCAs},
+		// Envelopes are ciphertext and gain nothing from gzip, while a
+		// transparently inflated body lets a few KiB on the wire become
+		// gigabytes past every cap we set (AG-4).
+		DisableCompression: true,
 	}
 	c := &Client{
 		base:    base,
@@ -529,6 +537,29 @@ type Receipt struct {
 	Duplicates []string   `json:"duplicates"`
 }
 
+// covering keeps the entries of r that name an envelope of sent, each once:
+// what the relay can truthfully have said about this upload.
+func (r Receipt) covering(sent []envelope.Envelope) Receipt {
+	want := make(map[string]bool, len(sent))
+	for _, e := range sent {
+		want[e.ID] = true
+	}
+	var out Receipt
+	for _, a := range r.Accepted {
+		if want[a.ID] {
+			want[a.ID] = false
+			out.Accepted = append(out.Accepted, a)
+		}
+	}
+	for _, id := range r.Duplicates {
+		if want[id] {
+			want[id] = false
+			out.Duplicates = append(out.Duplicates, id)
+		}
+	}
+	return out
+}
+
 // MintPairing asks the relay for a pending pairing (POST /v1/pairings).
 func (c *Client) MintPairing(ctx context.Context) (Pairing, error) {
 	r, err := c.do(ctx, http.MethodPost, "/v1/pairings", nil)
@@ -578,7 +609,9 @@ func (c *Client) CompletePairing(ctx context.Context, pairingID string, phonePub
 // chunks them to the relay's batch limits, posts a lone envelope bare so the
 // batch wrapper can never push a full-size one over the cap, and holds the
 // pair's one-in-flight slot for the direction until every chunk is answered.
-// The receipt covers what the relay accepted, even when a later chunk failed.
+// The receipt covers what the relay accepted, even when a later chunk failed,
+// and only envelopes it was sent; a chunk's receipt that does not account for
+// each of its envelopes exactly once is ErrProtocol.
 func (c *Client) Upload(ctx context.Context, pair string, envs []envelope.Envelope) (Receipt, error) {
 	var receipt Receipt
 	if len(envs) == 0 {
@@ -616,9 +649,15 @@ func (c *Client) Upload(ctx context.Context, pair string, envs []envelope.Envelo
 		if err := json.Unmarshal(r.body, &part); err != nil {
 			return receipt, fmt.Errorf("%w: upload receipt: %w", ErrProtocol, err)
 		}
-		receipt.Accepted = append(receipt.Accepted, part.Accepted...)
-		receipt.Duplicates = append(receipt.Duplicates, part.Duplicates...)
+		covered := part.covering(envs[start : start+end])
+		receipt.Accepted = append(receipt.Accepted, covered.Accepted...)
+		receipt.Duplicates = append(receipt.Duplicates, covered.Duplicates...)
 		c.log.Debug("envelopes uploaded", "pair", pair, "count", end, "accepted", len(part.Accepted), "duplicates", len(part.Duplicates))
+		if n := len(covered.Accepted) + len(covered.Duplicates); n != end || len(part.Accepted)+len(part.Duplicates) != end {
+			// A receipt that leaves envelopes unaccounted for would have the
+			// caller post them again at once, forever (AG-5).
+			return receipt, fmt.Errorf("%w: upload receipt accounts for %d of %d envelopes", ErrProtocol, n, end)
+		}
 		start += end
 	}
 	return receipt, nil
@@ -660,7 +699,8 @@ func batch(encoded [][]byte) (n int, body []byte) {
 func (c *Client) Ack(ctx context.Context, pair string, cursor Cursor) error {
 	n, err := strconv.ParseUint(string(cursor), 10, 63)
 	if err != nil {
-		return fmt.Errorf("relay: ack cursor %q is not a non-negative integer", string(cursor))
+		// ErrBadRequest, as the relay would answer: retrying cannot help.
+		return fmt.Errorf("%w: ack cursor %q is not a non-negative integer", ErrBadRequest, string(cursor))
 	}
 	body, err := json.Marshal(struct {
 		Cursor uint64 `json:"cursor"`

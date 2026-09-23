@@ -30,10 +30,12 @@ type fakeRelay struct {
 	inflight    int
 	maxInflight int
 	acks        []relay.Cursor
+	ackErr      error
 	cursor      int
 	events      chan relay.Event
 	streamErr   chan error
 	streams     int
+	starts      []time.Time
 }
 
 func newFakeRelay() *fakeRelay {
@@ -71,12 +73,13 @@ func (f *fakeRelay) Ack(_ context.Context, _ string, c relay.Cursor) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acks = append(f.acks, c)
-	return nil
+	return f.ackErr
 }
 
 func (f *fakeRelay) Stream(ctx context.Context, _ string, _ relay.Cursor, h relay.Handler) error {
 	f.mu.Lock()
 	f.streams++
+	f.starts = append(f.starts, time.Now())
 	f.mu.Unlock()
 	for {
 		select {
@@ -636,6 +639,101 @@ func TestRelayTooLargeDropsALoneEnvelope(t *testing.T) {
 		// A 413 is not retried: the queue empties by dropping.
 		if st := h.tun.Snapshot(); st[0].QueueRecords != 0 {
 			t.Errorf("queue after 413s = %d records, want 0", st[0].QueueRecords)
+		}
+	})
+}
+
+// A decide whose envelope the relay refuses never reaches the phone; its
+// hook is answered at once instead of at its timeout (AG-17).
+func TestRelayRefusedDecideAnswersAtOnce(t *testing.T) {
+	t.Parallel()
+	for _, refusal := range []error{relay.ErrTooLarge, relay.ErrBadRequest} {
+		t.Run(refusal.Error(), func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				h := newHarness(t, nil)
+				defer h.stop(t)
+				h.relay.setUploadErr(fmt.Errorf("fake: %w", refusal), false)
+				got := make(chan bool, 1)
+				go func() {
+					_, ok, _ := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), event("PermissionRequest"), time.Hour)
+					got <- ok
+				}()
+				synctest.Wait()
+				select {
+				case ok := <-got:
+					if ok {
+						t.Error("a refused decide answered ok, want no decision")
+					}
+				default:
+					t.Fatal("the refused decide is still held, want it answered at once")
+				}
+				if st := h.tun.Snapshot(); st[0].Held != 0 || st[0].QueueRecords != 0 {
+					t.Errorf("after the refusal: %d held, %d queued; want 0, 0", st[0].Held, st[0].QueueRecords)
+				}
+			})
+		})
+	}
+}
+
+// An ack cursor the relay refuses is dropped rather than resent every
+// second for good (AG-18).
+func TestRefusedAckIsNotRetried(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, nil)
+		defer h.stop(t)
+		h.relay.mu.Lock()
+		h.relay.ackErr = fmt.Errorf("fake: %w", relay.ErrBadRequest)
+		h.relay.mu.Unlock()
+		h.relay.events <- relay.Event{Kind: relay.EventPresence, Cursor: "5", Presence: &relay.Presence{Peer: "phone", State: "connected"}}
+		h.relay.events <- relay.Event{Kind: relay.EventEnvelope, Cursor: "6", Envelope: new(h.phone.seal(record.Record{Kind: record.KindControl, Control: record.ControlPolicy}))}
+		synctest.Wait()
+		time.Sleep(10 * ackInterval)
+		synctest.Wait()
+		h.relay.mu.Lock()
+		acks := h.relay.acks
+		h.relay.mu.Unlock()
+		if len(acks) != 1 || acks[0] != "6" {
+			t.Errorf("acks = %v, want [6] once", acks)
+		}
+	})
+}
+
+// The receiver's backoff starts over after a stream that held up, so an
+// occasional failure does not creep toward the cap (AG-18).
+func TestReceiverBackoffResetsAfterAHealthyStream(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, nil)
+		defer h.stop(t)
+		fail := func() {
+			h.relay.streamErr <- errors.New("relay down")
+			synctest.Wait()
+		}
+		// Each of the first three streams fails the moment it opens.
+		for i := range 3 {
+			fail()
+			time.Sleep(backoff(i))
+			synctest.Wait()
+		}
+		time.Sleep(2 * streamHealthy)
+		fail()
+		time.Sleep(backoffMax)
+		synctest.Wait()
+		h.relay.mu.Lock()
+		starts := h.relay.starts
+		h.relay.mu.Unlock()
+		if len(starts) != 5 {
+			t.Fatalf("%d stream opens, want 5", len(starts))
+		}
+		// Opens 1-3 failed at once, so each waited longer than the one before.
+		for i, want := range []time.Duration{backoff(0), backoff(1), backoff(2)} {
+			if got := starts[i+1].Sub(starts[i]); got != want {
+				t.Errorf("wait before open %d = %v, want %v", i+2, got, want)
+			}
+		}
+		// Open 4 held for two minutes; the wait after it is the first again.
+		if got := starts[4].Sub(starts[3]) - 2*streamHealthy; got != backoff(0) {
+			t.Errorf("wait after a healthy stream = %v, want %v", got, backoff(0))
 		}
 	})
 }

@@ -2,6 +2,7 @@ package relay_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/x509"
@@ -12,6 +13,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -170,8 +172,8 @@ func TestAckSendsTheCursorAsANumber(t *testing.T) {
 	if got := <-bodies; got != `{"cursor":1387}` {
 		t.Errorf("ack body = %s, want {\"cursor\":1387}", got)
 	}
-	if err := client.Ack(t.Context(), "p", "not-a-cursor"); err == nil {
-		t.Error("Ack of a non-numeric cursor: want an error")
+	if err := client.Ack(t.Context(), "p", "not-a-cursor"); !errors.Is(err, relay.ErrBadRequest) {
+		t.Errorf("Ack of a non-numeric cursor: err = %v, want ErrBadRequest", err)
 	}
 }
 
@@ -287,6 +289,99 @@ func TestUploadRefusals(t *testing.T) {
 	fake.Revoke(pairID)
 	if _, err := client.Upload(ctx, pairID, []envelope.Envelope{mkEnv(t, pairID, envelope.DirH2P, 4, 8)}); !errors.Is(err, relay.ErrRevoked) {
 		t.Errorf("Upload to a revoked pair: err = %v, want ErrRevoked", err)
+	}
+}
+
+// A receipt that does not account for every envelope it answers would have
+// the uploader post the same batch again at once, forever (AG-5).
+func TestUploadReceiptMustAccountForTheBatch(t *testing.T) {
+	t.Parallel()
+
+	envs := []envelope.Envelope{mkEnv(t, pairID, envelope.DirH2P, 1, 8), mkEnv(t, pairID, envelope.DirH2P, 2, 8)}
+	a, b := envs[0].ID, envs[1].ID
+	accepted := func(ids ...string) string {
+		parts := make([]string, len(ids))
+		for i, id := range ids {
+			parts[i] = fmt.Sprintf(`{"id":%q,"cursor":%d,"ttlSec":3600}`, id, i+1)
+		}
+		return "[" + strings.Join(parts, ",") + "]"
+	}
+	tests := []struct {
+		name     string
+		receipt  string
+		wantErr  bool
+		wantKept int
+	}{
+		{name: "exact", receipt: `{"accepted":` + accepted(a) + `,"duplicates":["` + b + `"]}`, wantKept: 2},
+		{name: "empty object", receipt: `{}`, wantErr: true},
+		{name: "one missing", receipt: `{"accepted":` + accepted(a) + `}`, wantErr: true, wantKept: 1},
+		{name: "unknown id in place of one", receipt: `{"accepted":` + accepted(a, "XXXXXXXXXXXXXXXXXXXXXXXXXX") + `}`, wantErr: true, wantKept: 1},
+		{name: "one id twice", receipt: `{"accepted":` + accepted(a) + `,"duplicates":["` + a + `"]}`, wantErr: true, wantKept: 1},
+		{name: "extra entry", receipt: `{"accepted":` + accepted(a, b) + `,"duplicates":["` + a + `"]}`, wantErr: true, wantKept: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.receipt))
+			}))
+			t.Cleanup(srv.Close)
+			client, err := relay.New(newIdentity(t).Auth(), relay.Options{BaseURL: srv.URL})
+			if err != nil {
+				t.Fatalf("relay.New: %v", err)
+			}
+			receipt, err := client.Upload(t.Context(), pairID, envs)
+			if tt.wantErr != errors.Is(err, relay.ErrProtocol) {
+				t.Errorf("Upload: err = %v, want ErrProtocol: %t", err, tt.wantErr)
+			}
+			if got := len(receipt.Accepted) + len(receipt.Duplicates); got != tt.wantKept {
+				t.Errorf("receipt names %d envelopes, want %d (only ours, each once)", got, tt.wantKept)
+			}
+		})
+	}
+}
+
+// A relay that gzips its answers anyway gets them read as they are: the
+// client neither asks for gzip nor inflates it, so no cap can be outrun
+// by decompression (AG-4).
+func TestBodiesAreNeverInflated(t *testing.T) {
+	t.Parallel()
+
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	_, _ = zw.Write([]byte("event: presence\nid: 1\ndata: {\"peer\":\"phone\",\"state\":\"connected\"}\n\n"))
+	_ = zw.Close()
+	var askedGzip atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			askedGzip.Add(1)
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(gz.Bytes())
+	}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	s := &sleeps{cancel: cancel, after: 2}
+	client, err := relay.New(newIdentity(t).Auth(), relay.Options{BaseURL: srv.URL, Sleep: s.sleep})
+	if err != nil {
+		t.Fatalf("relay.New: %v", err)
+	}
+	var events atomic.Int32
+	err = client.Stream(ctx, pairID, "", func(context.Context, relay.Event) error {
+		events.Add(1)
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stream: err = %v, want context.Canceled", err)
+	}
+	if n := events.Load(); n != 0 {
+		t.Errorf("handler saw %d events from a gzipped body, want 0: it was inflated", n)
+	}
+	if n := askedGzip.Load(); n != 0 {
+		t.Errorf("%d requests carried Accept-Encoding: gzip, want none", n)
 	}
 }
 

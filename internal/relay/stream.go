@@ -82,7 +82,7 @@ func (c *Client) Stream(ctx context.Context, pair string, last Cursor, h Handler
 		switch ev.name {
 		case "envelope":
 			var env envelope.Envelope
-			if json.Unmarshal([]byte(ev.data), &env) != nil {
+			if json.Unmarshal(ev.data, &env) != nil {
 				// The relay's problem, not ours; the row would repeat on every
 				// resume, so skip it rather than stall the pair.
 				c.log.Warn("stream envelope unreadable, skipped", "pair", pair, "cursor", ev.id, "bytes", len(ev.data))
@@ -95,7 +95,7 @@ func (c *Client) Stream(ctx context.Context, pair string, last Cursor, h Handler
 				State string          `json:"state"`
 				At    json.RawMessage `json:"at"`
 			}
-			if json.Unmarshal([]byte(ev.data), &body) != nil {
+			if json.Unmarshal(ev.data, &body) != nil {
 				c.log.Warn("stream presence unreadable, skipped", "pair", pair, "cursor", ev.id)
 				return nil //nolint:nilerr // presence is advisory; an unreadable one is dropped
 			}
@@ -131,7 +131,7 @@ func (c *Client) WaitPairing(ctx context.Context, pairingID string) (Completed, 
 			PhonePub string            `json:"phonePub"`
 			Envelope envelope.Envelope `json:"envelope"`
 		}
-		if err := json.Unmarshal([]byte(ev.data), &body); err != nil {
+		if err := json.Unmarshal(ev.data, &body); err != nil {
 			return fmt.Errorf("%w: completed event: %w", ErrProtocol, err)
 		}
 		pub, err := base64.RawURLEncoding.Strict().DecodeString(body.PhonePub)
