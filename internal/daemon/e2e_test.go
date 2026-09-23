@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"claircode.app/clair-agent/internal/claudecfg"
+	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/daemon"
 	"claircode.app/clair-agent/internal/envelope"
 	"claircode.app/clair-agent/internal/identity"
@@ -143,6 +144,7 @@ type world struct {
 	fake    *relaytest.Fake
 	dir     *state.Dir
 	agent   state.Agent
+	hostKey string
 	phone   *phone
 	inst    *installer
 	sampler *sampler
@@ -214,12 +216,9 @@ func newWorld(t *testing.T) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &world{fake: fake, dir: dir, agent: agent, inst: &installer{}, sampler: &sampler{idle: 5 * time.Second}, done: make(chan error, 1)}
+	w := &world{fake: fake, dir: dir, agent: agent, hostKey: base64.RawURLEncoding.EncodeToString(host.AuthPublic()), inst: &installer{}, sampler: &sampler{idle: 5 * time.Second}}
 	w.phone = &phone{t: t, keys: phoneSide, client: phoneClient, seen: make(chan *record.Record, 64), wakes: make(map[uint64]envelope.Wake)}
 
-	ctx, cancel := context.WithCancel(t.Context())
-	w.stop = cancel
-	t.Cleanup(cancel)
 	phoneCtx, stopPhone := context.WithCancel(t.Context())
 	t.Cleanup(stopPhone)
 	go func() {
@@ -227,21 +226,45 @@ func newWorld(t *testing.T) *world {
 			t.Errorf("phone stream: %v", err)
 		}
 	}()
+	w.start(t)
+	return w
+}
+
+// start runs a daemon on the world's config directory until w.stop; its
+// result arrives on w.done.
+func (w *world) start(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	w.stop = cancel
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	w.done = done
 	ready := make(chan string, 1)
 	go func() {
-		w.done <- daemon.Run(ctx, daemon.Options{
-			Dir: dir, Agent: agent, Listen: "127.0.0.1:0", Version: "test",
+		done <- daemon.Run(ctx, daemon.Options{
+			Dir: w.dir, Agent: w.agent, Listen: "127.0.0.1:0", Version: "test",
 			Now: time.Now, Entropy: rand.Reader, Installer: w.inst, Presence: w.sampler, Ready: ready,
 		})
 	}()
 	select {
 	case w.addr = <-ready:
-	case err := <-w.done:
+	case err := <-done:
 		t.Fatalf("daemon stopped before it was ready: %v", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("daemon never became ready")
 	}
-	return w
+}
+
+// hostCalls is the statuses the relay answered the host's requests with,
+// for one method and path, in order.
+func (w *world) hostCalls(method, path string) []int {
+	var out []int
+	for _, r := range w.fake.Requests() {
+		if r.Key == w.hostKey && r.Method == method && r.RequestURI == path {
+			out = append(out, r.Status)
+		}
+	}
+	return out
 }
 
 // hook posts a hook as Claude Code would and returns the status, body and content type.
@@ -362,23 +385,26 @@ func TestEndToEnd(t *testing.T) {
 		return len(w.inst.snippets) == 1 && bytes.Equal(w.inst.snippets[0], snippet)
 	})
 
-	// The phone revokes the pair with its sealed revoke record: hooks and the
-	// host key go, the daemon keeps answering locally. The relay's DELETE
-	// purges the mailbox, so it may only follow once the record was read;
-	// alone it would only park the pair (TestRelayOnlyRevokeKeepsTheHostsState).
+	// The phone unpairs as RELAY.md r9 §6.6 has it: its sealed revoke, and
+	// the DELETE once the relay took it. The relay keeps the record for the
+	// host, whose stream drains it before `revoked`: hooks and the host key
+	// go, the daemon keeps answering locally, and the relay is told too
+	// (alone, the DELETE would only park the pair:
+	// TestRelayOnlyRevokeKeepsTheHostsState).
 	w.phone.send(ctx, record.Record{Kind: record.KindControl, Control: record.ControlRevoke})
+	if err := w.phone.client.Revoke(ctx, pairID); err != nil {
+		t.Fatalf("phone revoke: %v", err)
+	}
 	waitFor(t, func() bool {
 		w.inst.mu.Lock()
 		defer w.inst.mu.Unlock()
 		return w.inst.uninstall == 1
 	})
-	if err := w.phone.client.Revoke(ctx, pairID); err != nil && !errors.Is(err, relay.ErrRevoked) {
-		t.Fatalf("phone revoke: %v", err)
-	}
 	waitFor(t, func() bool {
 		_, err := w.dir.LoadHostKey()
 		return errors.Is(err, state.ErrNotFound)
 	})
+	waitFor(t, func() bool { return len(w.hostCalls(http.MethodDelete, "/v1/pairs/"+pairID)) == 1 })
 	// The receiver's final counter flush must not resurrect the pair file.
 	time.Sleep(100 * time.Millisecond)
 	if _, err := os.Stat(filepath.Join(w.dir.Path(), "pairs", pairID+".json")); !errors.Is(err, os.ErrNotExist) {
@@ -570,6 +596,100 @@ func TestShutdownReleasesHeldDecides(t *testing.T) {
 	}
 	if rec := w.phone.next(t); rec.Control != record.ControlCancel || rec.Reason != record.CancelStop {
 		t.Errorf("after shutdown the phone got %+v, want the cancel (stop)", rec)
+	}
+	// The stream was let go of on purpose before the daemon returned, so the
+	// phone sees the host leave at once (ADR 2026-09.hu4b).
+	if got := w.hostCalls(http.MethodDelete, "/v1/pairs/"+pairID+"/events"); len(got) != 1 || got[0] != http.StatusNoContent {
+		t.Errorf("stream releases on shutdown = %v, want one 204", got)
+	}
+}
+
+// The control surface's release stops a pair — its stream let go of at the
+// relay — and hands its file to the CLI, which seals the pair's goodbye from
+// it (ADR 2026-09.69ym): the daemon no longer deletes it.
+func TestReleasePairHandsTheFileOver(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	ctx := t.Context()
+	w.phone.next(t) // hello-ack
+	w.phone.next(t) // reset
+	control := &ctl.Client{Base: "http://" + w.addr, AdminToken: w.agent.AdminToken}
+	if err := control.ReleasePair(ctx, pairID); err != nil {
+		t.Fatalf("ReleasePair: %v", err)
+	}
+	if got := w.hostCalls(http.MethodDelete, "/v1/pairs/"+pairID+"/events"); len(got) != 1 || got[0] != http.StatusNoContent {
+		t.Errorf("stream releases by the time ReleasePair returned = %v, want one 204", got)
+	}
+	if _, err := w.dir.LoadPair(pairID); err != nil {
+		t.Errorf("pair file after the release: %v, want it left for the CLI", err)
+	}
+	if st, err := control.Status(ctx); err != nil || st.Paired {
+		t.Errorf("status after the release = %+v, %v; want nothing running", st, err)
+	}
+	if err := control.ReleasePair(ctx, pairID); !errors.Is(err, ctl.ErrNotFound) {
+		t.Errorf("a second release: %v, want ctl.ErrNotFound", err)
+	}
+	w.stop()
+	if err := <-w.done; err != nil {
+		t.Fatalf("daemon.Run: %v", err)
+	}
+}
+
+// The phone unpairs while the host is down (RELAY.md r9 §6.6): the relay
+// keeps its sealed revoke for the host. The daemon starts, its reset is
+// refused, the pair parks; the stream drains the record and the pair ends —
+// hooks and host key gone — without resuming in between: nothing it sends is
+// accepted, and the relay is told too (ADR 2026-09.32b5).
+func TestPhoneUnpairWhileTheHostIsDownEndsThePairCleanly(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	ctx := t.Context()
+	w.phone.next(t) // hello-ack
+	w.phone.next(t) // reset
+	w.stop()
+	if err := <-w.done; err != nil {
+		t.Fatalf("daemon.Run: %v", err)
+	}
+	accepted := len(w.fake.Rows(pairID, envelope.DirH2P))
+	w.phone.send(ctx, record.Record{Kind: record.KindControl, Control: record.ControlRevoke})
+	if err := w.phone.client.Revoke(ctx, pairID); err != nil {
+		t.Fatalf("phone revoke: %v", err)
+	}
+	before := len(w.hostCalls(http.MethodPost, "/v1/pairs/"+pairID+"/envelopes"))
+
+	w.start(t)
+	waitFor(t, func() bool {
+		w.inst.mu.Lock()
+		defer w.inst.mu.Unlock()
+		return w.inst.uninstall == 1
+	})
+	waitFor(t, func() bool {
+		_, err := w.dir.LoadHostKey()
+		return errors.Is(err, state.ErrNotFound)
+	})
+	waitFor(t, func() bool { return len(w.hostCalls(http.MethodDelete, "/v1/pairs/"+pairID)) == 1 })
+	if _, err := os.Stat(filepath.Join(w.dir.Path(), "pairs", pairID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("pair file after the drained revoke: err = %v, want gone", err)
+	}
+	// At most the start's reset and one probe, both refused: no resume.
+	uploads := w.hostCalls(http.MethodPost, "/v1/pairs/"+pairID+"/envelopes")[before:]
+	for _, status := range uploads {
+		if status != http.StatusGone {
+			t.Errorf("the host's uploads after the phone unpaired = %v, want each refused 410", uploads)
+			break
+		}
+	}
+	if len(uploads) > 2 {
+		t.Errorf("the host uploaded %d times on a pair the phone had unpaired, want the start's reset and one probe at most", len(uploads))
+	}
+	if got := len(w.fake.Rows(pairID, envelope.DirH2P)); got > accepted {
+		t.Errorf("the relay holds %d host rows, had %d: something the restarted host sent was taken", got, accepted)
+	}
+	w.stop()
+	if err := <-w.done; err != nil {
+		t.Fatalf("daemon.Run: %v", err)
 	}
 }
 
