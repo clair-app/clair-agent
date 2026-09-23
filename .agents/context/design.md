@@ -32,6 +32,10 @@ the behaviour. See "Relay contract" below.
   `permission_mode`, only to tell a background subagent's decide, which is handed to the
   terminal while someone is at one (§4.3, ADR 2026-09.34qh). The loopback server also checks
   that `session_id` is *present* (the phone's 400 rule) and never reads it.
+- The phone is trusted to answer prompts, not to act on the host. Its decide answer is checked
+  against the held request — `tool_name`, `tool_input`, `permission_suggestions`, read at answer
+  time only — and rebuilt (`internal/hookout`, ADR 2026-09.w4ww); its snippets are rebuilt from
+  the agent's own hook template (ADR 2026-09.ut2g).
 - The relay (`clair-server`) never holds a traffic key and is trusted for nothing (§3,
   §10). Everything the agent sends it is ciphertext plus routing headers.
 
@@ -39,7 +43,7 @@ the behaviour. See "Relay contract" below.
 
 | RELAY.md | Package | What it owns |
 | --- | --- | --- |
-| §4, §4.1 | `internal/hookserver`, `internal/record` | Loopback listener on `127.0.0.1:7317` with `HookServer`'s bearer-and-path contract; tunnel records (`request` / `response` / `control`); `/hook/event`, `/statusline`, `/ping` answered `204` locally; `/hook/decide` held open until the response record or the deadline; `/status` answered locally |
+| §4, §4.1 | `internal/hookserver`, `internal/record`, `internal/hookout` | Loopback listener on `127.0.0.1:7317` with `HookServer`'s bearer-and-path contract; tunnel records (`request` / `response` / `control`); `/hook/event`, `/statusline`, `/ping` answered `204` locally; `/hook/decide` held open until the response record or the deadline, and answered only with what the request allows; `/status` answered locally |
 | §4.2 | `internal/tunnel` | One bounded FIFO per pair (draft 2 000 records / 16 MiB), shedding `no` first, then `soon`, never `now`; in memory; `reset` on start, `cancel {reqId, reason}` when Claude Code abandons a decide (`client`), the terminal takes it (`terminal`) or the agent stops (`stop`) |
 | §4.3 | `internal/presence`, `internal/tunnel` | Terminal input idle from pty access times (`/dev/pts/*`, `/dev/ttys*`) or `GetLastInputInfo`; stamped as `X-Clair-Idle-Ms` on every request record; a `bubble` decide is released to the terminal at once while the idle is under the phone's threshold (`hello.presence` / `policy`, default 120 s, 0 = off), or when someone returns while it is held; flips while a decide is held go out as `/hook/presence` requests (`now`) |
 | §5.1 | `internal/identity`, `internal/state` | Host X25519 + Ed25519 seeds in `host.key` (0600) under `os.UserConfigDir()/clair` — `~/.config/clair` on Linux, `~/Library/Application Support/clair` on macOS, `%AppData%\clair` on Windows; `CLAIR_CONFIG_DIR` overrides |
@@ -94,7 +98,9 @@ here): the `X-Clair-Idle-Ms` header, `cancel.reason`, `hello.presence` / the `po
   `reset {}` follows the `hello-ack` on every start.
 - **G3** — a snippet is accepted only if every hook is the agent's own `http` hook, or the
   one `command` hook that runs this binary's `hook-event` (ADR 2026-09.3gre); the phone's
-  block must carry `__PORT__`, `__TOKEN__`, `__CLAIR_HOST__` and `__CLAIR_EXE__`.
+  block must carry `__PORT__`, `__TOKEN__`, `__CLAIR_HOST__` and `__CLAIR_EXE__`. Since
+  ADR 2026-09.ut2g it is rebuilt, not installed as sent: only `PermissionRequest` may reach
+  `/hook/decide`, and headers and `allowedEnvVars` are the agent's, never the phone's.
 - **G4** — `SessionStart` **cannot** be an `http` hook: Claude Code 2.1.278 logs "HTTP hooks are
   not supported for SessionStart" and skips it (verified with a real session). It is a
   `command` hook running `<clair> hook-event /clair/v1/hook/event` — this binary, never

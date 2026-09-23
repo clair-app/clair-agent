@@ -20,7 +20,8 @@ an explanation, that explanation belongs in the ADR.
 | `n`, `h2pNext`, `p2hLast`, the mailbox cursor, or a pair file's counters | [ADR 2026-09.hzwt](../memory/decisions/2026-09-hzwt-the-replay-counter-survives-restarts-by-block-reservation.md) |
 | `/clair/ctl`, the admin token, the hookserver guard order, or who writes a pair file | [ADR 2026-09.r7kd](../memory/decisions/2026-09-r7kd-the-control-surface-shares-the-loopback-listener-under-clair-ctl-with-its-own.md) |
 | `settings.json`, the hooks block, `statusLine`, or `internal/ojson` | [ADR 2026-09.evep](../memory/decisions/2026-09-evep-the-agent-edits-settings-json-through-an-order-preserving-json-object-and.md) |
-| what a phone snippet may install | [ADR 2026-09.3gre](../memory/decisions/2026-09-3gre-a-phone-snippet-may-only-shape-the-agent-s-own-http-hooks.md) |
+| what a phone snippet may install, `ValidateSnippet`, or a hook option (`headers`, `allowedEnvVars`, a new member) | [ADR 2026-09.ut2g](../memory/decisions/2026-09-ut2g-a-phone-snippet-is-rebuilt-from-the-agent-s-own-hook-template.md), then [ADR 2026-09.3gre](../memory/decisions/2026-09-3gre-a-phone-snippet-may-only-shape-the-agent-s-own-http-hooks.md) |
+| `internal/hookout`, what `/hook/decide` answers Claude Code, or a new shape of phone answer (a tool whose input it may edit, a plan mode) | [ADR 2026-09.w4ww](../memory/decisions/2026-09-w4ww-the-agent-answers-a-held-decide-only-with-what-the-permissionrequest-allows.md) |
 | `internal/presence`, a held decide's lifetime, `permission_mode`, `X-Clair-Idle-Ms`, or the idea of reading a third hook field | [ADR 2026-09.34qh](../memory/decisions/2026-09-34qh-the-agent-reads-terminal-input-idle-time-itself-and-releases-a-bubbled-decide.md) |
 
 Add a row when an ADR guards something a future edit is likely to touch; not every ADR

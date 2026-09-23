@@ -120,3 +120,44 @@ func TestAccessors(t *testing.T) {
 		t.Errorf("FromRaw = %v, %v", raw, err)
 	}
 }
+
+func TestEqual(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{`{"a":1,"b":[true,null,"x"]}`, `{"b":[true,null,"x"],"a":1}`, true},
+		{`{"a":{"c":1,"d":2}}`, `{"a":{"d":2,"c":1}}`, true},
+		{`{}`, `{}`, true},
+		{`[]`, `[]`, true},
+		{`"x"`, `"x"`, true},
+		{`null`, `null`, true},
+		{`{"a":1}`, `{"a":1,"b":1}`, false},
+		{`{"a":1,"b":1}`, `{"a":1,"c":1}`, false},
+		{`{"a":1}`, `{"a":"1"}`, false},
+		{`{"a":1}`, `{"a":1.0}`, false},
+		{`[1,2]`, `[2,1]`, false},
+		{`[1]`, `[1,1]`, false},
+		{`{}`, `[]`, false},
+		{`null`, `{}`, false},
+		{`false`, `null`, false},
+	}
+	for _, tt := range tests {
+		a, err := ParseBytes([]byte(tt.a))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := ParseBytes([]byte(tt.b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := Equal(a, b); got != tt.want {
+			t.Errorf("Equal(%s, %s) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+		if got := Equal(b, a); got != tt.want {
+			t.Errorf("Equal(%s, %s) = %v, want %v", tt.b, tt.a, got, tt.want)
+		}
+	}
+}

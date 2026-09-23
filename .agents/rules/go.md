@@ -39,7 +39,11 @@ ADR 2026-09.kau2; the design constraints come from `RELAY.md` (see `context/desi
 - Every goroutine has an owner that can stop it and a documented reason to exist. The
   race detector (`make test`) is the judge; a data race is a bug even if it "can't matter".
 - A phone-supplied snippet may only shape the agent's own `http` hooks (ADR 2026-09.3gre):
-  never write a `command` hook from anything the phone sent.
+  never write a `command` hook from anything the phone sent, and never write a phone's hook
+  object as sent — rebuild it from the agent's template, each event pinned to its endpoint
+  (ADR 2026-09.ut2g).
+- A phone's decide answer never reaches Claude Code as sent: `internal/hookout` checks it
+  against the request and rebuilds it (ADR 2026-09.w4ww).
 
 ## The tunnel is blind — a domain rule
 
@@ -48,9 +52,11 @@ ADR 2026-09.kau2; the design constraints come from `RELAY.md` (see `context/desi
   `permission_mode` tells a background subagent's decide, which is released to the terminal
   while someone is at it (§4.3, ADR 2026-09.34qh). It never inspects, transforms or branches
   on any other part of a hook body. If a change needs a third, that is a design change: an
-  ADR first. The one nuance: the loopback server checks that `session_id` is *present* — the
+  ADR first. Two nuances: the loopback server checks that `session_id` is *present* — the
   phone's 400 rule, so a hook the phone would drop fails fast instead of hanging a decide —
-  and never reads it.
+  and never reads it; and when the phone *answers* a decide, `internal/hookout` reads the
+  held request's `tool_name`, `tool_input` and `permission_suggestions` to check the answer
+  against it (ADR 2026-09.w4ww) — never before, never logged, never changing what is tunnelled.
 - Presence is sampled in-process (`internal/presence`: pty access times, `GetLastInputInfo`)
   and only when a hook arrives or a decide is held — the tunnel's watcher ticks, but samples
   nothing while nothing is held. Never a `command` hook, never a helper binary.

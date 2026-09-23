@@ -1,6 +1,6 @@
 // Package claudecfg edits Claude Code's settings.json the way the phone's
 // installer does (RELAY.md §6.5, the phone's setup.sh): it renders the hooks
-// block, substitutes a phone-supplied snippet's placeholders and checks it,
+// block, substitutes a phone-supplied snippet's placeholders and rebuilds it,
 // merges either into settings.json without touching anything else, wraps the
 // user's statusLine in `clair statusline`, and undoes all of it on unpair.
 package claudecfg
@@ -84,7 +84,6 @@ func HookEventCommand(exe string) string {
 // RenderHooks builds `{"hooks": {...}}` exactly as the phone's HooksSnippet
 // does, with SessionStart as a command hook running this binary.
 func RenderHooks(c SnippetConfig) *ojson.Object {
-	base := strings.TrimSuffix(c.BaseURL, "/")
 	permission := c.PermissionTimeoutSec
 	if permission <= 0 {
 		permission = permissionTimeoutSec
@@ -93,48 +92,64 @@ func RenderHooks(c SnippetConfig) *ojson.Object {
 	if event <= 0 {
 		event = eventTimeoutSec
 	}
-	httpHook := func(path string, timeout int, status string) *ojson.Object {
-		h := ojson.NewObject()
-		h.Set("type", "http")
-		h.Set("url", base+path)
-		headers := ojson.NewObject()
-		headers.Set("Authorization", "Bearer "+c.Token)
-		if c.Host != "" {
-			headers.Set(record.HostHeader, c.Host)
-		}
-		h.Set("headers", headers)
-		h.Set("timeout", json.Number(strconv.Itoa(timeout)))
-		if status != "" {
-			h.Set("statusMessage", status)
-		}
-		return h
-	}
-	group := func(matcher string, hook *ojson.Object) []ojson.Value {
-		g := ojson.NewObject()
-		if matcher != "" {
-			g.Set("matcher", matcher)
-		}
-		g.Set("hooks", []ojson.Value{hook})
-		return []ojson.Value{g}
-	}
 	hooks := ojson.NewObject()
-	hooks.Set("PermissionRequest", group("", httpHook(record.PathDecide+"?"+record.TimeoutQuery+"="+strconv.Itoa(permission), permission, statusPermission)))
+	hooks.Set("PermissionRequest", group("", c.httpHook(decidePath(permission), permission, statusPermission)))
 	for _, e := range eventHooks {
-		hooks.Set(e.event, group(e.matcher, httpHook(record.PathEvent, event, "")))
+		hooks.Set(e.event, group(e.matcher, c.httpHook(record.PathEvent, event, "")))
 	}
 	if c.IncludeSessionStart {
 		if c.ClairExe != "" {
-			cmd := ojson.NewObject()
-			cmd.Set("type", "command")
-			cmd.Set("command", HookEventCommand(c.ClairExe))
-			hooks.Set("SessionStart", group("", cmd))
+			hooks.Set("SessionStart", group("", commandHook(c.ClairExe)))
 		} else {
-			hooks.Set("SessionStart", group("", httpHook(record.PathEvent, event, "")))
+			hooks.Set("SessionStart", group("", c.httpHook(record.PathEvent, event, "")))
 		}
 	}
 	out := ojson.NewObject()
 	out.Set("hooks", hooks)
 	return out
+}
+
+// httpHook is the one shape of the agent's http hooks, whoever asked for
+// it: the bearer and the host header are always the agent's own, and there
+// is never an allowedEnvVars (ADR 2026-09.ut2g). A timeout of 0 is omitted,
+// as is an empty status.
+func (c SnippetConfig) httpHook(path string, timeout int, status string) *ojson.Object {
+	h := ojson.NewObject()
+	h.Set("type", "http")
+	h.Set("url", strings.TrimSuffix(c.BaseURL, "/")+path)
+	headers := ojson.NewObject()
+	headers.Set("Authorization", "Bearer "+c.Token)
+	if c.Host != "" {
+		headers.Set(record.HostHeader, c.Host)
+	}
+	h.Set("headers", headers)
+	if timeout > 0 {
+		h.Set("timeout", json.Number(strconv.Itoa(timeout)))
+	}
+	if status != "" {
+		h.Set("statusMessage", status)
+	}
+	return h
+}
+
+func commandHook(exe string) *ojson.Object {
+	cmd := ojson.NewObject()
+	cmd.Set("type", "command")
+	cmd.Set("command", HookEventCommand(exe))
+	return cmd
+}
+
+func decidePath(timeout int) string {
+	return record.PathDecide + "?" + record.TimeoutQuery + "=" + strconv.Itoa(timeout)
+}
+
+func group(matcher string, hooks ...ojson.Value) []ojson.Value {
+	g := ojson.NewObject()
+	if matcher != "" {
+		g.Set("matcher", matcher)
+	}
+	g.Set("hooks", hooks)
+	return []ojson.Value{g}
 }
 
 // Substitute fills a phone snippet's placeholders; exe is quoted for the
@@ -144,12 +159,23 @@ func Substitute(snippet []byte, port int, token, host, exe string) []byte {
 	return []byte(r.Replace(string(snippet)))
 }
 
-// ValidateSnippet parses a substituted snippet and accepts it only if it is
-// `{"hooks": {...}}` whose every hook is `type: "http"` with a URL under
-// baseURL + Marker, or the one `command` hook that runs this binary's
-// hook-event: the phone shapes the agent's own hooks and nothing else (a
-// compromised phone must not install `command` hooks on the host).
-func ValidateSnippet(snippet []byte, baseURL, exe string) (*ojson.Object, error) {
+// ValidateSnippet parses a substituted snippet and rebuilds it from the
+// agent's own template (ADR 2026-09.3gre, 2026-09.ut2g). It is accepted only
+// if it is `{"hooks": {...}}` whose every hook is one of:
+//
+//   - for PermissionRequest, an http hook to the decide endpoint, with an
+//     optional `?timeout=<seconds>`;
+//   - for any other event, an http hook to the event endpoint, or the one
+//     `command` hook that runs this binary's hook-event.
+//
+// Of a phone's hook only the endpoint, a timeout and a statusMessage are
+// kept, and of a group only its matcher; the headers are the agent's own
+// (c.Token, c.Host) and nothing else a phone sent — allowedEnvVars above all,
+// which would have Claude Code copy its environment into a header the agent
+// forwards — reaches settings.json. A compromised phone shapes the agent's
+// own hooks and nothing else, and cannot route an event it is only told
+// about to the endpoint whose answer Claude Code obeys.
+func ValidateSnippet(snippet []byte, c SnippetConfig) (*ojson.Object, error) {
 	v, err := ojson.ParseBytes(snippet)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSnippetRejected, err)
@@ -163,40 +189,131 @@ func ValidateSnippet(snippet []byte, baseURL, exe string) (*ojson.Object, error)
 	if !ok || hooks == nil {
 		return nil, fmt.Errorf("%w: no hooks object", ErrSnippetRejected)
 	}
-	prefix := strings.TrimSuffix(baseURL, "/") + Marker
-	ownCommand := HookEventCommand(exe)
+	rebuilt := ojson.NewObject()
 	for _, event := range hooks.Keys() {
 		groupsVal, _ := hooks.Get(event)
 		groups := ojson.AsArray(groupsVal)
 		if groups == nil {
 			return nil, fmt.Errorf("%w: %s is not an array", ErrSnippetRejected, event)
 		}
+		out := make([]ojson.Value, 0, len(groups))
 		for _, g := range groups {
-			group := ojson.AsObject(g)
-			if group == nil {
-				return nil, fmt.Errorf("%w: %s has a non-object group", ErrSnippetRejected, event)
+			grp, err := c.rebuildGroup(event, g)
+			if err != nil {
+				return nil, err
 			}
-			innerVal, _ := group.Get("hooks")
-			for _, h := range ojson.AsArray(innerVal) {
-				hook := ojson.AsObject(h)
-				if hook == nil {
-					return nil, fmt.Errorf("%w: %s has a non-object hook", ErrSnippetRejected, event)
-				}
-				typ, _ := hook.Get("type")
-				url, _ := hook.Get("url")
-				cmd, _ := hook.Get("command")
-				switch {
-				case ojson.AsString(typ) == "http" && strings.HasPrefix(ojson.AsString(url), prefix):
-				case ojson.AsString(typ) == "command" && exe != "" && ojson.AsString(cmd) == ownCommand:
-				default:
-					return nil, fmt.Errorf("%w: %s has a hook that is neither an http hook to %s nor %q", ErrSnippetRejected, event, prefix, ownCommand)
-				}
-			}
+			out = append(out, grp)
 		}
+		rebuilt.Set(event, out)
+	}
+	res := ojson.NewObject()
+	res.Set("hooks", rebuilt)
+	return res, nil
+}
+
+func (c SnippetConfig) rebuildGroup(event string, g ojson.Value) (*ojson.Object, error) {
+	grp := ojson.AsObject(g)
+	if grp == nil {
+		return nil, fmt.Errorf("%w: %s has a non-object group", ErrSnippetRejected, event)
 	}
 	out := ojson.NewObject()
+	if m, ok := grp.Get("matcher"); ok {
+		if _, isString := m.(string); !isString {
+			return nil, fmt.Errorf("%w: %s has a matcher that is not a string", ErrSnippetRejected, event)
+		}
+		out.Set("matcher", m)
+	}
+	innerVal, _ := grp.Get("hooks")
+	inner := ojson.AsArray(innerVal)
+	hooks := make([]ojson.Value, 0, len(inner))
+	for _, h := range inner {
+		hook, err := c.rebuildHook(event, ojson.AsObject(h))
+		if err != nil {
+			return nil, err
+		}
+		hooks = append(hooks, hook)
+	}
 	out.Set("hooks", hooks)
 	return out, nil
+}
+
+func (c SnippetConfig) rebuildHook(event string, hook *ojson.Object) (*ojson.Object, error) {
+	if hook == nil {
+		return nil, fmt.Errorf("%w: %s has a non-object hook", ErrSnippetRejected, event)
+	}
+	decide := event == "PermissionRequest"
+	endpoint := record.PathEvent
+	if decide {
+		endpoint = record.PathDecide
+	}
+	typ, _ := hook.Get("type")
+	switch typ {
+	case "http":
+		url, _ := hook.Get("url")
+		path, err := c.endpointPath(ojson.AsString(url), endpoint, decide)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: %w", ErrSnippetRejected, event, err)
+		}
+		timeout := 0
+		if t, ok := hook.Get("timeout"); ok {
+			if timeout, ok = seconds(t); !ok {
+				return nil, fmt.Errorf("%w: %s has a timeout that is not 1 to %d seconds", ErrSnippetRejected, event, maxTimeoutSec)
+			}
+		}
+		status, _ := hook.Get("statusMessage")
+		return c.httpHook(path, timeout, ojson.AsString(status)), nil
+	case "command":
+		cmd, _ := hook.Get("command")
+		if decide || c.ClairExe == "" || ojson.AsString(cmd) != HookEventCommand(c.ClairExe) {
+			return nil, fmt.Errorf("%w: %s has a command hook other than %q", ErrSnippetRejected, event, HookEventCommand(c.ClairExe))
+		}
+		return commandHook(c.ClairExe), nil
+	default:
+		return nil, fmt.Errorf("%w: %s has a hook that is neither http nor this binary's hook-event", ErrSnippetRejected, event)
+	}
+}
+
+// maxTimeoutSec bounds a snippet's timeouts: the phone's own maximum
+// (HooksConfig.MAX_PERMISSION_TIMEOUT_SEC) and record.MaxDecideTimeout.
+const maxTimeoutSec = permissionTimeoutSec
+
+// endpointPath checks a phone hook's URL against the one endpoint its event
+// may reach and returns the path to render: the endpoint, plus for a decide
+// the timeout query re-rendered from its number.
+func (c SnippetConfig) endpointPath(url, endpoint string, decide bool) (string, error) {
+	rest, ok := strings.CutPrefix(url, strings.TrimSuffix(c.BaseURL, "/"))
+	if !ok {
+		return "", fmt.Errorf("url is not on %s", c.BaseURL)
+	}
+	path, query, hasQuery := strings.Cut(rest, "?")
+	if path != endpoint {
+		return "", fmt.Errorf("url is not %s", endpoint)
+	}
+	if !hasQuery {
+		return path, nil
+	}
+	raw, ok := strings.CutPrefix(query, record.TimeoutQuery+"=")
+	if !decide || !ok {
+		return "", fmt.Errorf("url has a query other than %s=<seconds> on %s", record.TimeoutQuery, record.PathDecide)
+	}
+	secs, ok := seconds(json.Number(raw))
+	if !ok {
+		return "", fmt.Errorf("url's %s is not 1 to %d seconds", record.TimeoutQuery, maxTimeoutSec)
+	}
+	return decidePath(secs), nil
+}
+
+// seconds reads a timeout: a JSON integer from 1 to maxTimeoutSec.
+func seconds(v ojson.Value) (int, bool) {
+	n, ok := v.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	secs, err := strconv.Atoi(string(n))
+	if err != nil || secs < 1 || secs > maxTimeoutSec {
+		return 0, false
+	}
+	return secs, true
 }
 
 // isClair reports whether a hook group was written by a Clair installer:

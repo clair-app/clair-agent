@@ -3,7 +3,9 @@
 // (RELAY.md §4; the phone's bridge-ingress.md), plus the daemon's control
 // surface under /clair/ctl for the CLI. Every hook is handed to a Sink as a
 // request record; the server itself reads nothing of a hook but the two
-// fields the phone's 400 rule needs and the permission mode (record.Hook).
+// fields the phone's 400 rule needs and the permission mode (record.Hook),
+// until a decide is answered: the answer is checked against the request it
+// answers (internal/hookout).
 package hookserver
 
 import (
@@ -21,6 +23,8 @@ import (
 
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/envelope"
+	"claircode.app/clair-agent/internal/hookout"
+	"claircode.app/clair-agent/internal/hostname"
 	"claircode.app/clair-agent/internal/record"
 )
 
@@ -285,7 +289,11 @@ func (s *Server) request(r *http.Request, body []byte) (record.Record, error) {
 			rec.Query[k] = q.Get(k)
 		}
 	}
-	if host := strings.TrimSpace(r.Header.Get(record.HostHeader)); host != "" {
+	// Only a name in the sanitised-hostname set is forwarded: the header is
+	// the one thing of the request's metadata the phone sees, and a hook
+	// whose headers were shaped elsewhere must not carry anything else
+	// through it (ADR 2026-09.ut2g).
+	if host := strings.TrimSpace(r.Header.Get(record.HostHeader)); hostname.Valid(host) {
 		rec.Headers = map[string]string{record.HostHeader: host}
 	}
 	return rec, nil
@@ -347,15 +355,21 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 		s.log.Debug("decide abandoned", "req_id", rec.ReqID, "error", err.Error())
 		return
 	}
-	if !ok || resp.Status == http.StatusNoContent || (resp.Status == http.StatusOK && len(resp.Body) == 0) {
+	if !ok || resp.Status != http.StatusOK || len(resp.Body) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if len(resp.Body) > 0 {
-		w.Header().Set("Content-Type", "application/json")
+	// The phone may allow or deny what it was shown, nothing more: its answer
+	// is checked against this request and rebuilt (ADR 2026-09.w4ww).
+	out, err := hookout.Check(body, resp.Body)
+	if err != nil {
+		s.log.Warn("decide answer refused", "req_id", rec.ReqID, "bytes", len(resp.Body), "error", err.Error())
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
-	w.WriteHeader(resp.Status)
-	_, _ = w.Write(resp.Body)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
 }
 
 func (s *Server) statusline(w http.ResponseWriter, r *http.Request) {

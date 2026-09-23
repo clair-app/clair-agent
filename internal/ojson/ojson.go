@@ -264,3 +264,38 @@ func AsString(v Value) string {
 	}
 	return s
 }
+
+// Equal reports whether two values are the same JSON: objects compare as
+// sets of members, whatever their order; arrays element by element; numbers
+// by their literal, which is what a peer that echoes a value sends back.
+func Equal(a, b Value) bool {
+	switch x := a.(type) {
+	case *Object:
+		y, ok := b.(*Object)
+		if !ok || x.Len() != y.Len() {
+			return false
+		}
+		for _, k := range x.keys {
+			yv, ok := y.Get(k)
+			if !ok || !Equal(x.values[k], yv) {
+				return false
+			}
+		}
+		return true
+	case []Value:
+		y, ok := b.([]Value)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !Equal(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	case string, json.Number, bool, nil:
+		return a == b
+	default:
+		return false
+	}
+}

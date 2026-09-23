@@ -1,0 +1,151 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:__PORT__/clair/v1/hook/decide?timeout=86400",
+            "headers": {
+              "Authorization": "Bearer __TOKEN__",
+              "X-Clair-Host": "__CLAIR_HOST__"
+            },
+            "timeout": 86400,
+            "statusMessage": "Clair: also on your watch…"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:__PORT__/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer __TOKEN__",
+              "X-Clair-Host": "__CLAIR_HOST__"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:__PORT__/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer __TOKEN__",
+              "X-Clair-Host": "__CLAIR_HOST__"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:__PORT__/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer __TOKEN__",
+              "X-Clair-Host": "__CLAIR_HOST__"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:__PORT__/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer __TOKEN__",
+              "X-Clair-Host": "__CLAIR_HOST__"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:__PORT__/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer __TOKEN__",
+              "X-Clair-Host": "__CLAIR_HOST__"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:__PORT__/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer __TOKEN__",
+              "X-Clair-Host": "__CLAIR_HOST__"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:__PORT__/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer __TOKEN__",
+              "X-Clair-Host": "__CLAIR_HOST__"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:__PORT__/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer __TOKEN__",
+              "X-Clair-Host": "__CLAIR_HOST__"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__CLAIR_EXE__ hook-event /clair/v1/hook/event"
+          }
+        ]
+      }
+    ]
+  }
+}

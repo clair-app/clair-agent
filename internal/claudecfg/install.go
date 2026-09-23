@@ -255,7 +255,9 @@ type SnippetInstaller struct {
 
 // InstallSnippet substitutes, validates and installs a phone snippet.
 func (s SnippetInstaller) InstallSnippet(snippet json.RawMessage) error {
-	hooks, err := ValidateSnippet(Substitute(snippet, s.Port, s.Token, s.Host, s.ClairExe), s.BaseURL, s.ClairExe)
+	hooks, err := ValidateSnippet(Substitute(snippet, s.Port, s.Token, s.Host, s.ClairExe), SnippetConfig{
+		BaseURL: s.BaseURL, Token: s.Token, Host: s.Host, ClairExe: s.ClairExe,
+	})
 	if err != nil {
 		return err
 	}
