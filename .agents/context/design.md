@@ -2,8 +2,9 @@
 
 **The design is not in this repository.** It is `docs/RELAY.md` in the `clair` repository
 (the phone/watch app) — normally a sibling checkout at `../clair`, i.e.
-`../clair/docs/RELAY.md` (revision 2026-09-22 **r3**: r2 folded in this implementation's
-corrections, r3 the presence rule — its "Revision 2" and "Revision 3" lists are the diff). Read it before any design-level work;
+`../clair/docs/RELAY.md` (revision 2026-09-23 **r9**: r2 folded in this implementation's
+corrections, r3 the presence rule, r8 canonical v2 signing, r9 the pairing and revoke seams — its
+"Revision" lists are the diff). Read it before any design-level work;
 this page is the map from its sections to this codebase, not a copy. If the sibling checkout
 is missing, ask for it rather than working from memory: the document is revisioned and the
 numbers marked *draft* move.
@@ -78,10 +79,9 @@ Deliberate, all recorded in ADRs:
 - **`clair statusline`** replaces the `sh clair-statusline.sh` shim (ADR 2026-09.evep).
 - **Config lives under `os.UserConfigDir()/clair`**, which is `~/.config/clair` on Linux only.
 - **Canonical v2 signing, and registration at mint/complete** (the relay's phase 4: ADRs
-  2026-09.9vsq and 2026-09.7fc3 in `clair-server`, ours 2026-09.n68c). RELAY.md §7.3 still shows
-  the three-parameter form and says a device registers on its first signed request. Its next
-  revision is deliberately deferred and folds these in. The agent signs v2 only, so it is ready
-  for the relay's `AUTH_NONCE=required`.
+  2026-09.9vsq and 2026-09.7fc3 in `clair-server`, ours 2026-09.n68c). RELAY.md r8 folded v2
+  into §7.3; the relay has refused every other form since it removed v1 (its ADR 2026-09.wzzg),
+  and the agent signs v2 only.
 - **A parked pair resumes when the relay accepts its `reset`**, not on its stream's first
   `presence` or envelope (ADR 2026-09.32b5). Since r9 a revoked pair's stream is served to the
   side that did not revoke it while the revoker's rows drain, so a served stream no longer proves
@@ -141,8 +141,8 @@ our layout, plus an independent HKDF in the tests.
 comment beside `specPath` in `internal/relay/contract_test.go` names the `clair-server`
 commit it was taken from, and a refresh updates both. `testdata/signing-vector-v2.json` is
 the relay's `src/auth/testdata/signing-vector-v2.json` under the same rule (`signingVectorPath`
-in `client_test.go`). `relaytest.Fake` verifies requests as the relay does with
-`AUTH_NONCE=required` (nonce single use per key, `Host` bound, no-nonce headers `malformed`) and
+in `client_test.go`). `relaytest.Fake` verifies requests as the relay does
+(nonce single use per key, `Host` bound, no-nonce headers `malformed`) and
 builds its canonical string itself. `TestContract` drives the real client
 (and raw signed requests for the refusals the client never provokes) through
 `relaytest.Fake`, records every exchange and checks it against the document: route and
