@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"time"
 )
 
@@ -81,12 +80,17 @@ func (e *StatusError) Error() string {
 // `pair_not_found` both ErrPairNotFound and ErrNotFound.
 func (e *StatusError) Unwrap() []error { return e.sentinels }
 
-// relayCodes404 are the `error` codes the relay itself answers a 404 with.
-var relayCodes404 = []string{"pair_not_found", "pairing_not_found", "device_not_found"}
-
 // edgeNotFound reports a 404 the relay did not answer itself: no `error`
 // code of its own, so it came from an edge, a proxy or the platform in front
 // of the relay and says nothing about the pair. It is retried like a 5xx.
 func (e *StatusError) edgeNotFound() bool {
-	return e.Status == http.StatusNotFound && !slices.Contains(relayCodes404, e.Code)
+	if e.Status != http.StatusNotFound {
+		return false
+	}
+	switch e.Code {
+	case "pair_not_found", "pairing_not_found", "device_not_found":
+		return false
+	default:
+		return true
+	}
 }
