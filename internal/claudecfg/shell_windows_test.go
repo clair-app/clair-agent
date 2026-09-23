@@ -20,3 +20,11 @@ func TestStatusLineCommandQuoting(t *testing.T) {
 		}
 	}
 }
+
+// Windows quotes a path with a space with double quotes: the phone's
+// snippet for C:\Program Files must still be valid JSON and accepted.
+func TestPhoneSnippetForAWindowsPathWithASpace(t *testing.T) {
+	t.Parallel()
+
+	checkPhoneSnippetFor(t, `C:\Program Files\clair\clair.exe`)
+}

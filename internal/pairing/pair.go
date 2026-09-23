@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"claircode.app/clair-agent/internal/claudecfg"
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/envelope"
 	"claircode.app/clair-agent/internal/identity"
@@ -44,6 +45,9 @@ var (
 	ErrDeclined = errors.New("pairing: declined")
 	// ErrNothingToUnpair is `clair unpair` on a host with no pair.
 	ErrNothingToUnpair = errors.New("pairing: nothing to unpair")
+	// ErrHooksNotWritten is a pair that was saved when no hooks, not even
+	// the built-in block, could be written to settings.json.
+	ErrHooksNotWritten = errors.New("pairing: Claude Code's hooks not written")
 )
 
 // Relay is the slice of the relay client pairing uses.
@@ -69,9 +73,11 @@ type Options struct {
 	NewRelay func(baseURL string, auth ed25519.PrivateKey) (Relay, error)
 	// Daemon is the running daemon, or nil; ctl.ErrUnreachable is tolerated.
 	Daemon Daemon
-	// Install writes the hooks: the phone's snippet when it sent one, else
-	// nil for the built-in block. Uninstall removes them.
-	Install   func(snippet json.RawMessage) error
+	// Install writes the hooks for the hello's snippet (nil when it sent
+	// none): the phone's, or the built-in block in its place; an error means
+	// none were written (claudecfg.SnippetInstaller.InstallAtPairing).
+	// Uninstall removes them.
+	Install   func(snippet json.RawMessage) (claudecfg.SnippetReport, error)
 	Uninstall func() error
 	Stdout    io.Writer
 	Stderr    io.Writer
@@ -233,10 +239,24 @@ func Pair(ctx context.Context, o Options) error {
 	if err := o.Dir.SavePair(pair); err != nil {
 		return err
 	}
-	if err := o.Install(hello.Snippet); err != nil {
-		fmt.Fprintf(o.Stderr, "clair pair: hooks not written: %v\n", err)
-	} else {
+	report, installErr := o.Install(hello.Snippet)
+	for _, w := range report.Warnings() {
+		fmt.Fprintf(o.Stderr, "clair pair: %s.\n", w)
+	}
+	if installErr != nil {
+		// The pair is kept: the phone shows it and the daemon runs it, but
+		// Claude Code calls nobody. Say so, and fail (ADR 2026-09.bckr).
+		o.reloadDaemon(ctx)
+		return fmt.Errorf("%w (%w). The pair with %q is saved, but Claude Code will not reach the phone until they are: "+
+			"fix that, then run `clair pair --replace` to pair again, or `clair unpair` to drop the pair", ErrHooksNotWritten, installErr, name)
+	}
+	switch {
+	case report.Unchanged:
+		fmt.Fprintln(o.Stdout, "Claude Code's settings.json already had these hooks; left as it was.")
+	case report.Backup != "":
 		fmt.Fprintln(o.Stdout, "Hooks written to Claude Code's settings.json (a .bak copy sits beside it).")
+	default:
+		fmt.Fprintln(o.Stdout, "Hooks written to Claude Code's settings.json.")
 	}
 	o.reloadDaemon(ctx)
 	fmt.Fprintf(o.Stdout, "Paired with %q. Fingerprint: %s\nRestart any running Claude Code session to pick up the hooks.\n", name, keys.Fingerprint())

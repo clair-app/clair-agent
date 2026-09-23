@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,7 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"claircode.app/clair-agent/internal/claudecfg"
 	"claircode.app/clair-agent/internal/ctl"
+	"claircode.app/clair-agent/internal/envelope"
+	"claircode.app/clair-agent/internal/identity"
+	"claircode.app/clair-agent/internal/pairing"
+	"claircode.app/clair-agent/internal/record"
+	"claircode.app/clair-agent/internal/relay"
+	"claircode.app/clair-agent/internal/relay/relaytest"
 	"claircode.app/clair-agent/internal/state"
 )
 
@@ -173,5 +181,126 @@ func TestPrintStatus(t *testing.T) {
 	printStatus(&out, ctl.Status{Paired: true, Pairs: []ctl.PairStatus{{PhoneName: "Pixel"}}})
 	if !strings.Contains(out.String(), "subagent prompts are always held for the phone") {
 		t.Errorf("rule-off output:\n%s", out.String())
+	}
+}
+
+// scanAsPhone waits for `clair pair` to print its link, then completes the
+// pairing the way the phone does, with the phone's own hooks template.
+func scanAsPhone(t *testing.T, stdout func() string, snippet json.RawMessage) {
+	t.Helper()
+	var link string
+	for deadline := time.Now().Add(10 * time.Second); link == "" && time.Now().Before(deadline); {
+		for line := range strings.SplitSeq(stdout(), "\n") {
+			if line = strings.TrimSpace(line); strings.Contains(line, pairing.PathPage+"#") {
+				link = line
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	relayURL, payload, err := pairing.ParseURL(link)
+	if err != nil {
+		t.Fatalf("no link in stdout (%v):\n%s", err, stdout())
+	}
+	keys, err := identity.Generate(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traffic, err := envelope.Derive(keys.Agreement(), payload.HostPub[:], payload.K[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := record.Record{N: 1, Kind: record.KindControl, Control: record.ControlHello, Name: "Pixel 9 Pro", Snippet: snippet}
+	plain, err := record.Marshal(&hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := envelope.NewID(time.Now(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := envelope.Seal(traffic.Key(envelope.DirP2H), envelope.Header{Pair: payload.PairingIDString(), ID: id, Dir: envelope.DirP2H, Wake: envelope.WakeSoon, TTLSec: 600}, plain, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := relay.New(keys.Auth(), relay.Options{BaseURL: relayURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CompletePairing(t.Context(), payload.PairingIDString(), keys.AgreementPublic(), "fcm", env); err != nil {
+		t.Fatalf("CompletePairing: %v", err)
+	}
+}
+
+// `clair pair` end to end in-process: the phone's own snippet is installed
+// for a binary whose path the shell must quote, and a settings.json nothing
+// can be written to is a failure that says the pair is kept (ADR 2026-09.bckr).
+func TestPairInstallsThePhonesHooks(t *testing.T) {
+	t.Parallel()
+
+	template, err := os.ReadFile("../../internal/claudecfg/testdata/phone-relay-snippet.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, settings string
+		wantStatus     int
+		wantErr        string
+	}{
+		{name: "a binary path with a quote and a space", wantStatus: exitOK},
+		{name: "a settings.json that is not an object", settings: `[1]`, wantStatus: exitError, wantErr: "clair pair --replace"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := relaytest.New()
+			t.Cleanup(fake.Close)
+			configDir, claudeDir := t.TempDir(), t.TempDir()
+			// No daemon: agent.json points at a port nothing listens on.
+			dir, oerr := state.Open(configDir)
+			if oerr != nil {
+				t.Fatal(oerr)
+			}
+			if _, _, aerr := dir.EnsureAgent(rand.Reader, state.Agent{Listen: "127.0.0.1:1", Relay: fake.URL}); aerr != nil {
+				t.Fatal(aerr)
+			}
+			settings := filepath.Join(claudeDir, "settings.json")
+			if tt.settings != "" {
+				if werr := os.WriteFile(settings, []byte(tt.settings), 0o600); werr != nil {
+					t.Fatal(werr)
+				}
+			}
+			d := testDeps(map[string]string{state.EnvConfigDir: configDir, claudecfg.EnvConfigDir: claudeDir})
+			const exe = "/opt/Walter's tools/clair"
+			d.exe = func() (string, error) { return exe, nil }
+			var mu sync.Mutex
+			var stdout, stderr bytes.Buffer
+			done := make(chan int, 1)
+			go func() {
+				done <- runWith(t.Context(), d, []string{"pair", "-qr", "none", "-yes"}, &lockedWriter{w: &stdout, mu: &mu}, &lockedWriter{w: &stderr, mu: &mu})
+			}()
+			scanAsPhone(t, func() string { mu.Lock(); defer mu.Unlock(); return stdout.String() }, template)
+			status := <-done
+			mu.Lock()
+			defer mu.Unlock()
+			if status != tt.wantStatus || !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Fatalf("pair = %d, want %d with %q\nstdout:\n%s\nstderr:\n%s", status, tt.wantStatus, tt.wantErr, stdout.String(), stderr.String())
+			}
+			if pairs, _ := dir.ListPairs(); len(pairs) != 1 {
+				t.Errorf("pairs = %d, want the pair kept", len(pairs))
+			}
+			if tt.wantStatus != exitOK {
+				return
+			}
+			data, err := os.ReadFile(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want, _ := json.Marshal(claudecfg.HookEventCommand(exe)); !bytes.Contains(data, want) || !bytes.Contains(data, []byte(`"url": "http://127.0.0.1:1/clair/v1/hook/decide?timeout=86400"`)) {
+				t.Errorf("settings.json lacks the phone's hooks for %q:\n%s", exe, data)
+			}
+			if strings.Contains(stderr.String(), "refused") {
+				t.Errorf("the phone's snippet was refused:\n%s", stderr.String())
+			}
+		})
 	}
 }

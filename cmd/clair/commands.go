@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"time"
 
-	"claircode.app/clair-agent/internal/claudecfg"
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/hookserver"
 	"claircode.app/clair-agent/internal/hostname"
@@ -122,16 +121,8 @@ func cmdPair(ctx context.Context, d deps, args []string, stdout, stderr io.Write
 		NewRelay: func(baseURL string, auth ed25519.PrivateKey) (pairing.Relay, error) {
 			return relay.New(auth, relay.Options{BaseURL: baseURL, RootCAs: pool, UserAgent: "clair-agent/" + v, Now: d.now})
 		},
-		Daemon: controlClient(agent),
-		Install: func(snippet json.RawMessage) error {
-			if snippet == nil {
-				_, err := installer.Install(claudecfg.RenderHooks(claudecfg.SnippetConfig{
-					BaseURL: installer.BaseURL, Token: installer.Token, Host: installer.Host, IncludeSessionStart: true, ClairExe: installer.ClairExe,
-				}))
-				return err
-			}
-			return installer.InstallSnippet(snippet)
-		},
+		Daemon:       controlClient(agent),
+		Install:      installer.InstallAtPairing,
 		Uninstall:    installer.Uninstall,
 		Stdout:       stdout,
 		Stderr:       stderr,

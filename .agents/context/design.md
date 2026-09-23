@@ -51,7 +51,7 @@ the behaviour. See "Relay contract" below.
 | §5.5 | `internal/envelope` | Standard-library `crypto/ecdh`, `crypto/hkdf`, `crypto/ed25519`; `golang.org/x/crypto/chacha20poly1305` is the only outside import (RELAY.md names `x/crypto/{curve25519,hkdf}`; the stdlib has both since Go 1.20/1.24) |
 | §6 | `internal/pairing` | `clair pair`: mint, the QR (`rsc.io/qr`, half-blocks, `-qr ascii|none`, `-invert`), wait, prove the phone knows `k` by opening `hello`, confirm on the controlling terminal, `hello-ack`, write the pair file and `settings.json`, reload the daemon |
 | §6.1 | `internal/pairing` | Payload `0x01 ‖ pairingId[16] ‖ hostPub[32] ‖ k[16] ‖ relay-host?` as `https://<relay>/p#<base64url>`; version 6 at level L |
-| §6.5, §6.6 | `internal/claudecfg`, `internal/ojson` | The order-preserving `settings.json` merge, the `clair statusline` shim, snippet substitution and validation; `clair unpair`; `410` handling |
+| §6.5, §6.6 | `internal/claudecfg`, `internal/ojson` | The order-preserving `settings.json` merge, the `clair statusline` shim, snippet substitution (values escaped as JSON) and validation (the phone's `http://127.0.0.1:<port>` accepted for the agent's port, the agent's origin written; events the template does not hook dropped with a warning); at pairing a refused snippet gives way to the built-in block with a warning, and no hooks at all fails `clair pair` with the pair kept; an install that changes nothing writes nothing (ADR 2026-09.bckr); `clair unpair`; `410` handling |
 | §7.2, §7.3 | `internal/relay` | SSE down + `POST` up (no WebSocket); `Authorization: Clair-Ed25519 key, ts, nonce, sig` over the relay's **canonical v2** (`"clair-v2"`, method, `Host`, target, ts, nonce, body hash; relay ADR 2026-09.9vsq, ours 2026-09.n68c): a fresh 16-byte `crypto/rand` nonce on every request, retries included; a `401 skew` (clock from `serverTime`, then `Date`) or `401 replay` is re-signed and retried once, a second refusal surfaced; bounded streams resumed with `Last-Event-ID`; one upload in flight per (pair, dir); `--relay-ca`, `HTTPS_PROXY` |
 | §7.4, §7.5 | `internal/tunnel`, `internal/record` | Cursor acks after *applying* envelopes, coalesced to 1 s; `wake` stamped from `hook_event_name`, `PostToolUse*` promoted to `soon` while a decide is held; TTLs |
 | §7.6 | `internal/tunnel`, `internal/ctl`, `internal/relay` | Presence shown by `clair status`. The newest `/events` stream owns a pair side's presence (relay ADR 2026-09.7fc3): an older one ends quietly, with no event and no `retry:`, and `Stream` treats that as a routine end and resumes with `Last-Event-ID`. The agent keeps exactly one `/events` stream per pair (`tunnel.pair.receiver`); a second would evict the first on every reconnect |
@@ -100,7 +100,12 @@ here): the `X-Clair-Idle-Ms` header, `cancel.reason`, `hello.presence` / the `po
   one `command` hook that runs this binary's `hook-event` (ADR 2026-09.3gre); the phone's
   block must carry `__PORT__`, `__TOKEN__`, `__CLAIR_HOST__` and `__CLAIR_EXE__`. Since
   ADR 2026-09.ut2g it is rebuilt, not installed as sent: only `PermissionRequest` may reach
-  `/hook/decide`, and headers and `allowedEnvVars` are the agent's, never the phone's.
+  `/hook/decide`, and headers and `allowedEnvVars` are the agent's, never the phone's. Since
+  ADR 2026-09.bckr the placeholders are filled in as JSON string content (a quoted Windows path
+  used to break the JSON), the phone's `127.0.0.1` is accepted for the agent's own port whatever
+  loopback spelling it listens on, an event the template does not hook is dropped with a
+  warning, and at pairing a refused snippet installs the built-in block — RELAY.md r2 item 5
+  promised that fallback; the agent installed nothing.
 - **G4** — `SessionStart` **cannot** be an `http` hook: Claude Code 2.1.278 logs "HTTP hooks are
   not supported for SessionStart" and skips it (verified with a real session). It is a
   `command` hook running `<clair> hook-event /clair/v1/hook/event` — this binary, never

@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -35,6 +37,10 @@ const (
 	PlaceholderToken = "__TOKEN__"
 	PlaceholderHost  = "__CLAIR_HOST__"
 	PlaceholderExe   = "__CLAIR_EXE__"
+	// The loopback host the phone's template hard-codes
+	// (`http://127.0.0.1:__PORT__`, RELAY.md §4); an agent listening on
+	// another spelling of loopback still accepts it for its own port.
+	canonicalHost = "127.0.0.1"
 )
 
 // ErrSnippetRejected is a phone snippet that would install anything but the
@@ -153,20 +159,59 @@ func group(matcher string, hooks ...ojson.Value) []ojson.Value {
 }
 
 // Substitute fills a phone snippet's placeholders; exe is quoted for the
-// platform shell, as HookEventCommand does.
+// platform shell, as HookEventCommand does. The placeholders sit inside JSON
+// strings, so every value is escaped for one: the quotes a path with a space
+// gets on Windows, or a ' or " in a Unix path, must not end the string they
+// land in (ADR 2026-09.bckr).
 func Substitute(snippet []byte, port int, token, host, exe string) []byte {
-	r := strings.NewReplacer(PlaceholderPort, strconv.Itoa(port), PlaceholderToken, token, PlaceholderHost, host, PlaceholderExe, quoteForShell(exe))
+	return substituteQuoted(snippet, strconv.Itoa(port), token, host, quoteForShell(exe))
+}
+
+// substituteQuoted is Substitute with the binary already quoted for the
+// shell, so the JSON layer can be tested with either platform's quoting.
+func substituteQuoted(snippet []byte, port, token, host, quotedExe string) []byte {
+	r := strings.NewReplacer(
+		PlaceholderPort, jsonEscape(port),
+		PlaceholderToken, jsonEscape(token),
+		PlaceholderHost, jsonEscape(host),
+		PlaceholderExe, jsonEscape(quotedExe),
+	)
 	return []byte(r.Replace(string(snippet)))
 }
 
+// jsonEscape is s as it is written between a JSON string's quotes.
+func jsonEscape(s string) string {
+	quoted, _ := ojson.Marshal(s, "") // a string always encodes
+	return string(quoted[1 : len(quoted)-1])
+}
+
+// knownEvent reports whether the agent's own template has a hook for an
+// event: a snippet may shape those and add no other (ADR 2026-09.bckr).
+func knownEvent(event string) bool {
+	if event == "PermissionRequest" || event == "SessionStart" {
+		return true
+	}
+	for _, e := range eventHooks {
+		if e.event == event {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidateSnippet parses a substituted snippet and rebuilds it from the
-// agent's own template (ADR 2026-09.3gre, 2026-09.ut2g). It is accepted only
-// if it is `{"hooks": {...}}` whose every hook is one of:
+// agent's own template (ADR 2026-09.3gre, 2026-09.ut2g, 2026-09.bckr). It is
+// accepted only if it is `{"hooks": {...}}` whose every hook is one of:
 //
 //   - for PermissionRequest, an http hook to the decide endpoint, with an
 //     optional `?timeout=<seconds>`;
 //   - for any other event, an http hook to the event endpoint, or the one
 //     `command` hook that runs this binary's hook-event.
+//
+// A URL is on the agent's own origin, or on the phone's canonical
+// `http://127.0.0.1:<port>` for the agent's port; either way the hook is
+// written with the agent's own origin. An event the template does not know is
+// left out and named in dropped, and a snippet with no event left is refused.
 //
 // Of a phone's hook only the endpoint, a timeout and a statusMessage are
 // kept, and of a group only its matcher; the headers are the agent's own
@@ -175,43 +220,52 @@ func Substitute(snippet []byte, port int, token, host, exe string) []byte {
 // forwards — reaches settings.json. A compromised phone shapes the agent's
 // own hooks and nothing else, and cannot route an event it is only told
 // about to the endpoint whose answer Claude Code obeys.
-func ValidateSnippet(snippet []byte, c SnippetConfig) (*ojson.Object, error) {
+func ValidateSnippet(snippet []byte, c SnippetConfig) (hooks *ojson.Object, dropped []string, err error) {
 	if len(snippet) > maxSnippetBytes {
-		return nil, fmt.Errorf("%w: %d bytes, over %d", ErrSnippetRejected, len(snippet), maxSnippetBytes)
+		return nil, nil, fmt.Errorf("%w: %d bytes, over %d", ErrSnippetRejected, len(snippet), maxSnippetBytes)
 	}
 	v, err := ojson.ParseBytes(snippet)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrSnippetRejected, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrSnippetRejected, err)
 	}
 	top := ojson.AsObject(v)
 	if top == nil {
-		return nil, fmt.Errorf("%w: not an object", ErrSnippetRejected)
+		return nil, nil, fmt.Errorf("%w: not an object", ErrSnippetRejected)
 	}
 	hooksVal, ok := top.Get("hooks")
-	hooks := ojson.AsObject(hooksVal)
-	if !ok || hooks == nil {
-		return nil, fmt.Errorf("%w: no hooks object", ErrSnippetRejected)
+	events := ojson.AsObject(hooksVal)
+	if !ok || events == nil {
+		return nil, nil, fmt.Errorf("%w: no hooks object", ErrSnippetRejected)
 	}
 	rebuilt := ojson.NewObject()
-	for _, event := range hooks.Keys() {
-		groupsVal, _ := hooks.Get(event)
+	for _, event := range events.Keys() {
+		if !knownEvent(event) {
+			dropped = append(dropped, event)
+			continue
+		}
+		groupsVal, _ := events.Get(event)
 		groups := ojson.AsArray(groupsVal)
 		if len(groups) == 0 {
-			return nil, fmt.Errorf("%w: %s is not a non-empty array", ErrSnippetRejected, event)
+			return nil, nil, fmt.Errorf("%w: %s is not a non-empty array", ErrSnippetRejected, event)
 		}
 		out := make([]ojson.Value, 0, len(groups))
 		for _, g := range groups {
 			grp, err := c.rebuildGroup(event, g)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, grp)
 		}
 		rebuilt.Set(event, out)
 	}
+	// Installing nothing would remove every Clair hook: a phone cannot turn
+	// the host off by sending an empty block, or only events it made up.
+	if rebuilt.Len() == 0 {
+		return nil, nil, fmt.Errorf("%w: no event this agent hooks", ErrSnippetRejected)
+	}
 	res := ojson.NewObject()
 	res.Set("hooks", rebuilt)
-	return res, nil
+	return res, dropped, nil
 }
 
 func (c SnippetConfig) rebuildGroup(event string, g ojson.Value) (*ojson.Object, error) {
@@ -287,13 +341,35 @@ const maxSnippetBytes = 64 << 10
 // (HooksConfig.MAX_PERMISSION_TIMEOUT_SEC) and record.MaxDecideTimeout.
 const maxTimeoutSec = permissionTimeoutSec
 
+// origins are the prefixes a phone hook's URL may start with: the agent's
+// own origin and, for the same port, the phone's canonical loopback one.
+func (c SnippetConfig) origins() []string {
+	own := strings.TrimSuffix(c.BaseURL, "/")
+	u, err := url.Parse(own)
+	if err != nil || u.Port() == "" {
+		return []string{own}
+	}
+	canonical := "http://" + net.JoinHostPort(canonicalHost, u.Port())
+	if canonical == own {
+		return []string{own}
+	}
+	return []string{own, canonical}
+}
+
 // endpointPath checks a phone hook's URL against the one endpoint its event
 // may reach and returns the path to render: the endpoint, plus for a decide
 // the timeout query re-rendered from its number.
 func (c SnippetConfig) endpointPath(url, endpoint string, decide bool) (string, error) {
-	rest, ok := strings.CutPrefix(url, strings.TrimSuffix(c.BaseURL, "/"))
+	origins := c.origins()
+	var rest string
+	ok := false
+	for _, origin := range origins {
+		if rest, ok = strings.CutPrefix(url, origin); ok {
+			break
+		}
+	}
 	if !ok {
-		return "", fmt.Errorf("url is not on %s", c.BaseURL)
+		return "", fmt.Errorf("url is not on %s", strings.Join(origins, " or "))
 	}
 	path, query, hasQuery := strings.Cut(rest, "?")
 	if path != endpoint {

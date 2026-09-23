@@ -8,7 +8,7 @@ topics: [hooks, security]
 
 # ADR 2026-09.3gre — A phone snippet may only shape the agent's own http hooks
 
-Status: Accepted (2026-09-21) · tightened by ADR 2026-09.ut2g (snippets are rebuilt from the agent's template, events pinned to endpoints)
+Status: Accepted (2026-09-21) · tightened by ADR 2026-09.ut2g (snippets are rebuilt from the agent's template, events pinned to endpoints) · amended by ADR 2026-09.bckr (values escaped as JSON, the phone's 127.0.0.1 accepted for the agent's port, unknown events dropped, the pairing fallback implemented)
 
 **What was observed.** RELAY.md §6.5 sends the hooks block from the phone, inside `hello` and
 later as a `snippet` control record, with `__PORT__`, `__TOKEN__` and `__CLAIR_HOST__`

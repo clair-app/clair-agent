@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"claircode.app/clair-agent/internal/claudecfg"
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/envelope"
 	"claircode.app/clair-agent/internal/identity"
@@ -247,6 +248,9 @@ type world struct {
 	mu        sync.Mutex
 	installed []json.RawMessage
 	uninstall int
+	// installReport and installErr are what Install answers.
+	installReport claudecfg.SnippetReport
+	installErr    error
 	// helloN and helloThreshold override what the scanning phone's hello
 	// says; zero keeps n=1 and 90 s.
 	helloN         uint64
@@ -272,11 +276,11 @@ func (w *world) options() Options {
 			return relay.New(auth, relay.Options{BaseURL: baseURL})
 		},
 		Daemon: w.daemon,
-		Install: func(s json.RawMessage) error {
+		Install: func(s json.RawMessage) (claudecfg.SnippetReport, error) {
 			w.mu.Lock()
 			defer w.mu.Unlock()
 			w.installed = append(w.installed, s)
-			return nil
+			return w.installReport, w.installErr
 		},
 		Uninstall: func() error {
 			w.mu.Lock()
@@ -481,6 +485,68 @@ func TestPairDeclinedAndHeadless(t *testing.T) {
 	}
 	if out := w2.stdout.String(); !strings.Contains(out, `Pairing with "Pixel 9 Pro"`) || !strings.Contains(out, "clair daemon") {
 		t.Errorf("headless stdout:\n%s", out)
+	}
+}
+
+// What the install did is said: a refused snippet or dropped events as
+// warnings, and no hooks at all as a failure that keeps the pair.
+func TestPairReportsTheHooksOutcome(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                     string
+		report                   claudecfg.SnippetReport
+		err                      error
+		wantOut, wantStderr, not string
+		wantErr                  bool
+	}{
+		{name: "written", report: claudecfg.SnippetReport{Report: claudecfg.Report{Backup: "x.bak"}}, wantOut: "Hooks written to Claude Code's settings.json (a .bak", not: "clair pair:"},
+		{name: "unchanged", report: claudecfg.SnippetReport{Report: claudecfg.Report{Unchanged: true}}, wantOut: "already had these hooks", not: "Hooks written"},
+		{
+			name:       "the phone's snippet refused",
+			report:     claudecfg.SnippetReport{Refused: fmt.Errorf("%w: Stop: url is not on http://127.0.0.1:7317", claudecfg.ErrSnippetRejected)},
+			wantOut:    "Paired with",
+			wantStderr: "clair pair: the phone's hooks were refused (claudecfg: snippet rejected: Stop: url is not on http://127.0.0.1:7317); the built-in hooks were written instead.",
+		},
+		{
+			name:       "no hooks at all",
+			report:     claudecfg.SnippetReport{Refused: claudecfg.ErrSnippetRejected},
+			err:        errors.New("claudecfg: settings.json is not a JSON object; not touching it"),
+			wantErr:    true,
+			wantStderr: "refused",
+			not:        "Paired with",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			w.installReport, w.installErr = tt.report, tt.err
+			done := make(chan error, 1)
+			go func() { done <- Pair(t.Context(), w.options()) }()
+			ph := w.scan(t, w.link(t), false, nil)
+			err := <-done
+			if tt.wantErr {
+				if !errors.Is(err, ErrHooksNotWritten) || !strings.Contains(err.Error(), "not a JSON object") || !strings.Contains(err.Error(), "clair pair --replace") {
+					t.Errorf("Pair: err = %v, want ErrHooksNotWritten with the cause and the way back", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Pair: %v", err)
+			}
+			if !strings.Contains(w.stdout.String(), tt.wantOut) || !strings.Contains(w.stderr.String(), tt.wantStderr) {
+				t.Errorf("stdout:\n%s\nstderr:\n%s\nwant %q and %q", w.stdout.String(), w.stderr.String(), tt.wantOut, tt.wantStderr)
+			}
+			if tt.not != "" && strings.Contains(w.stdout.String()+w.stderr.String(), tt.not) {
+				t.Errorf("output has %q:\n%s%s", tt.not, w.stdout.String(), w.stderr.String())
+			}
+			// Whatever the hooks, the pair is kept and the daemon has it.
+			if pairs, _ := w.dir.ListPairs(); len(pairs) != 1 || w.daemon.reloads != 1 {
+				t.Errorf("pairs = %d, reloads = %d; want the pair saved and the daemon told", len(pairs), w.daemon.reloads)
+			}
+			if err := ph.client.Ack(t.Context(), ph.pairID, "1"); err != nil {
+				t.Errorf("the kept pair at the relay: %v", err)
+			}
+		})
 	}
 }
 

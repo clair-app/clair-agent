@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"claircode.app/clair-agent/internal/claudecfg"
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/hookserver"
 	"claircode.app/clair-agent/internal/hostname"
@@ -32,8 +33,9 @@ const drainTimeout = 2 * time.Second
 // Installer applies hook configuration on the host. The claudecfg package
 // provides it; nil means "log and move on".
 type Installer interface {
-	// InstallSnippet writes a hooks block the phone sent (RELAY.md §6.5).
-	InstallSnippet(snippet json.RawMessage) error
+	// InstallSnippet writes a hooks block the phone sent (RELAY.md §6.5); a
+	// refused one leaves what is installed as it is.
+	InstallSnippet(snippet json.RawMessage) (claudecfg.SnippetReport, error)
 	// Uninstall removes the hooks and the statusline once nothing is paired.
 	Uninstall() error
 }
@@ -383,8 +385,16 @@ func (d *daemon) onSnippet(pairID string, snippet json.RawMessage) {
 }
 
 func (d *daemon) installSnippet(p *pendingSnippet) {
-	if err := d.opts.Installer.InstallSnippet(p.snippet); err != nil {
-		d.log.Warn("snippet not installed", "pair", p.pairID, "error", err.Error())
+	report, err := d.opts.Installer.InstallSnippet(p.snippet)
+	if err != nil {
+		d.log.Warn("snippet not installed; the hooks stay as they were", "pair", p.pairID, "error", err.Error())
+		return
+	}
+	for _, w := range report.Warnings() {
+		d.log.Warn("snippet trimmed", "pair", p.pairID, "detail", w)
+	}
+	if report.Unchanged {
+		d.log.Info("snippet already installed", "pair", p.pairID)
 		return
 	}
 	d.log.Info("hooks rewritten from the phone's snippet; restart Claude Code", "pair", p.pairID)

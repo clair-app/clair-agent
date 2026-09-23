@@ -1,6 +1,7 @@
 package claudecfg
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,11 +130,14 @@ type Installer struct {
 
 // Report says what an install or uninstall did.
 type Report struct {
-	// Backup is the path settings.json was moved to, or "" when there was none.
+	// Backup is the path settings.json was copied to, or "" when there was none.
 	Backup string
 	// StatusLine is wrapped, kept (not a command; left alone), restored,
 	// removed or none.
 	StatusLine string
+	// Unchanged is an edit that found settings.json already as it would have
+	// written it: nothing was written and nothing backed up.
+	Unchanged bool
 }
 
 // Install merges a hooks block and wraps the statusLine.
@@ -163,6 +168,8 @@ type current struct {
 // edit runs one read-modify-write of settings.json under the lock beside
 // it, so concurrent installs — the daemon's snippets, `clair pair`, `clair
 // unpair` — never lose each other's changes or the user's (ADR 2026-09.y34x).
+// An edit that changes nothing writes nothing: the phone may send the same
+// snippet again, and each would otherwise leave a backup (ADR 2026-09.bckr).
 func (in Installer) edit(change func(*ojson.Object) (string, error)) (Report, error) {
 	unlock, err := in.lock()
 	if err != nil {
@@ -176,6 +183,12 @@ func (in Installer) edit(change func(*ojson.Object) (string, error)) (Report, er
 	var report Report
 	if report.StatusLine, err = change(settings); err != nil {
 		return Report{}, err
+	}
+	if cur.exists {
+		if before, perr := ojson.ParseBytes(cur.data); perr == nil && ojson.Equal(before, settings) {
+			report.Unchanged = true
+			return report, nil
+		}
 	}
 	report.Backup, err = in.save(cur, settings)
 	return report, err
@@ -347,8 +360,11 @@ func (in Installer) wrapStatusLine(settings *ojson.Object) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("claudecfg: encode the original statusLine: %w", err)
 	}
-	if err := state.WriteFile(in.originalPath(), append(saved, '\n'), newFileMode); err != nil {
-		return "", fmt.Errorf("claudecfg: %w", err)
+	saved = append(saved, '\n')
+	if have, rerr := os.ReadFile(in.originalPath()); rerr != nil || !bytes.Equal(have, saved) {
+		if err := state.WriteFile(in.originalPath(), saved, newFileMode); err != nil {
+			return "", fmt.Errorf("claudecfg: %w", err)
+		}
 	}
 	wrapped := ojson.NewObject()
 	wrapped.Set("type", "command")
@@ -393,16 +409,87 @@ type SnippetInstaller struct {
 	Host    string
 }
 
-// InstallSnippet substitutes, validates and installs a phone snippet.
-func (s SnippetInstaller) InstallSnippet(snippet json.RawMessage) error {
-	hooks, err := ValidateSnippet(Substitute(snippet, s.Port, s.Token, s.Host, s.ClairExe), SnippetConfig{
-		BaseURL: s.BaseURL, Token: s.Token, Host: s.Host, ClairExe: s.ClairExe,
-	})
-	if err != nil {
-		return err
+// SnippetReport says what installing a phone snippet did.
+type SnippetReport struct {
+	Report
+
+	// Dropped names the snippet's events the agent's template does not
+	// know; they were left out.
+	Dropped []string
+	// Refused is why the phone's snippet was refused, when InstallAtPairing
+	// wrote the built-in block in its place.
+	Refused error
+}
+
+// Warnings says, as sentences for a person, where the install differs from
+// what the phone asked for.
+func (r SnippetReport) Warnings() []string {
+	var out []string
+	if r.Refused != nil {
+		out = append(out, fmt.Sprintf("the phone's hooks were refused (%v); the built-in hooks were written instead", r.Refused))
 	}
-	_, err = s.Install(hooks)
-	return err
+	if len(r.Dropped) > 0 {
+		out = append(out, "the phone's hooks name events this agent does not hook, left out: "+eventList(r.Dropped))
+	}
+	return out
+}
+
+// eventList quotes phone-supplied event names for a message, bounded in
+// number and length: a snippet may carry many, and long ones.
+func eventList(names []string) string {
+	const maxNames, maxLen = 5, 40
+	quoted := make([]string, 0, min(len(names), maxNames)+1)
+	for i, name := range names {
+		if i == maxNames {
+			quoted = append(quoted, fmt.Sprintf("and %d more", len(names)-maxNames))
+			break
+		}
+		if len(name) > maxLen {
+			name = name[:maxLen] + "…"
+		}
+		quoted = append(quoted, strconv.Quote(name))
+	}
+	return strings.Join(quoted, ", ")
+}
+
+func (s SnippetInstaller) config() SnippetConfig {
+	return SnippetConfig{BaseURL: s.BaseURL, Token: s.Token, Host: s.Host, ClairExe: s.ClairExe}
+}
+
+// InstallSnippet substitutes, validates and installs a phone snippet. A
+// refused one is ErrSnippetRejected and leaves settings.json as it was.
+func (s SnippetInstaller) InstallSnippet(snippet json.RawMessage) (SnippetReport, error) {
+	hooks, dropped, err := ValidateSnippet(Substitute(snippet, s.Port, s.Token, s.Host, s.ClairExe), s.config())
+	if err != nil {
+		return SnippetReport{}, err
+	}
+	report, err := s.Install(hooks)
+	return SnippetReport{Report: report, Dropped: dropped}, err
+}
+
+// InstallDefault installs the built-in block: the phone's HooksSnippet with
+// its defaults, SessionStart included.
+func (s SnippetInstaller) InstallDefault() (Report, error) {
+	c := s.config()
+	c.IncludeSessionStart = true
+	return s.Install(RenderHooks(c))
+}
+
+// InstallAtPairing installs what a new pair's hello asked for: the phone's
+// snippet, or the built-in block when it sent none or its snippet is refused
+// (ADR 2026-09.3gre, 2026-09.bckr), so a phone never leaves a new pair
+// without hooks. An error means no hooks were written at all.
+func (s SnippetInstaller) InstallAtPairing(snippet json.RawMessage) (SnippetReport, error) {
+	if len(bytes.TrimSpace(snippet)) == 0 || string(bytes.TrimSpace(snippet)) == "null" {
+		report, err := s.InstallDefault()
+		return SnippetReport{Report: report}, err
+	}
+	report, err := s.InstallSnippet(snippet)
+	if !errors.Is(err, ErrSnippetRejected) {
+		return report, err
+	}
+	fallback, ferr := s.InstallDefault()
+	return SnippetReport{Report: fallback, Refused: err}, ferr
 }
 
 // Uninstall removes the hooks and restores the statusLine.

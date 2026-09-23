@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"claircode.app/clair-agent/internal/claudecfg"
 	"claircode.app/clair-agent/internal/daemon"
 	"claircode.app/clair-agent/internal/envelope"
 	"claircode.app/clair-agent/internal/identity"
@@ -35,11 +36,11 @@ type installer struct {
 	uninstall int
 }
 
-func (i *installer) InstallSnippet(s json.RawMessage) error {
+func (i *installer) InstallSnippet(s json.RawMessage) (claudecfg.SnippetReport, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.snippets = append(i.snippets, bytes.Clone(s))
-	return nil
+	return claudecfg.SnippetReport{}, nil
 }
 
 func (i *installer) Uninstall() error {

