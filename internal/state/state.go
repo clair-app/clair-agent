@@ -96,6 +96,11 @@ type Pair struct {
 	// from its hello and then its policy records; nil is the agent's default,
 	// 0 switches the release of bubbled decides off.
 	IdleThresholdSec *int `json:"idleThresholdSec,omitempty"`
+	// RelayRevokedAt is when the relay first said, without a break since,
+	// that this pair is gone (410 or 404). Unauthenticated, it only parks the
+	// pair; it ends it once it has held for the grace period (ADR
+	// 2026-09.9ufb).
+	RelayRevokedAt *time.Time `json:"relayRevokedAt,omitempty"`
 }
 
 // Keys decodes the pair's traffic keys.
@@ -374,6 +379,17 @@ func (d *Dir) ClearPendingHelloAck(id string) error {
 // agent's default.
 func (d *Dir) SetIdleThreshold(id string, sec *int) error {
 	return d.updatePair(id, func(p *Pair) { p.IdleThresholdSec = sec })
+}
+
+// SetRelayRevokedAt records when the relay began reporting a pair gone; the
+// zero time clears it.
+func (d *Dir) SetRelayRevokedAt(id string, at time.Time) error {
+	return d.updatePair(id, func(p *Pair) {
+		p.RelayRevokedAt = nil
+		if !at.IsZero() {
+			p.RelayRevokedAt = &at
+		}
+	})
 }
 
 func (d *Dir) updatePair(id string, fn func(*Pair)) error {

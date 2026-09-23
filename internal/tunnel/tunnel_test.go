@@ -218,6 +218,7 @@ type harness struct {
 	snippets [][]byte
 	presence []bool
 	policies []record.Presence
+	dormant  []time.Time
 }
 
 func newHarness(t *testing.T, mod func(*PairConfig)) *harness {
@@ -252,6 +253,11 @@ func newHarnessWith(t *testing.T, opts func(*Options), mod func(*PairConfig)) *h
 				h.mu.Lock()
 				defer h.mu.Unlock()
 				h.policies = append(h.policies, policy)
+			},
+			OnDormant: func(_ string, since time.Time) {
+				h.mu.Lock()
+				defer h.mu.Unlock()
+				h.dormant = append(h.dormant, since)
 			},
 		},
 	}
@@ -738,7 +744,8 @@ func TestReceiverBackoffResetsAfterAHealthyStream(t *testing.T) {
 	})
 }
 
-func TestRevokeReleasesHoldsAndNotifiesOnce(t *testing.T) {
+// The phone's own sealed revoke record ends the pair at once.
+func TestPhoneRevokeReleasesHoldsAndNotifiesOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newHarness(t, nil)
 		defer h.stop(t)
@@ -748,7 +755,8 @@ func TestRevokeReleasesHoldsAndNotifiesOnce(t *testing.T) {
 			got <- ok
 		}()
 		synctest.Wait()
-		h.relay.events <- relay.Event{Kind: relay.EventRevoked}
+		revoke := h.phone.seal(record.Record{Kind: record.KindControl, Control: record.ControlRevoke})
+		h.relay.events <- relay.Event{Kind: relay.EventEnvelope, Cursor: "1", Envelope: &revoke}
 		synctest.Wait()
 		select {
 		case ok := <-got:
@@ -773,19 +781,144 @@ func TestRevokeReleasesHoldsAndNotifiesOnce(t *testing.T) {
 	})
 }
 
-func TestRelayRefusalRevokes(t *testing.T) {
+// Whatever the relay says about a pair being gone is unauthenticated: the
+// pair is parked — its holds answered, its hooks skipped — but nothing is
+// deleted, and the start is recorded for the grace period (AG-3).
+func TestRelayReportedRevokeParksThePair(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		report func(h *harness)
+		reason string
+	}{
+		{"event revoked", func(h *harness) { h.relay.events <- relay.Event{Kind: relay.EventRevoked} }, "the relay reports the pair revoked"},
+		{"stream 410", func(h *harness) { h.relay.streamErr <- relay.ErrRevoked }, "the relay reports the pair revoked"},
+		{"stream 404", func(h *harness) { h.relay.streamErr <- relay.ErrNotFound }, "the relay does not know the pair"},
+		{"upload 410", func(h *harness) {
+			h.relay.setUploadErr(relay.ErrRevoked, false)
+			_ = h.tun.Enqueue(hook("Stop"), event("Stop"))
+		}, "the relay reports the pair revoked"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				h := newHarness(t, nil)
+				defer h.stop(t)
+				got := make(chan bool, 1)
+				go func() {
+					_, ok, _ := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), event("PermissionRequest"), time.Hour)
+					got <- ok
+				}()
+				synctest.Wait()
+				start := time.Now()
+				tt.report(h)
+				synctest.Wait()
+				select {
+				case ok := <-got:
+					if ok {
+						t.Error("a held decide answered ok, want no decision")
+					}
+				default:
+					t.Fatal("the held decide is still held after the relay reported the pair gone")
+				}
+				h.mu.Lock()
+				revoked, dormant := h.revoked, h.dormant
+				h.mu.Unlock()
+				if len(revoked) != 0 {
+					t.Errorf("OnRevoked = %v, want nothing deleted on the relay's word", revoked)
+				}
+				if len(dormant) != 1 || !dormant[0].Equal(start) {
+					t.Errorf("OnDormant = %v, want once with %v", dormant, start)
+				}
+				st := h.tun.Snapshot()
+				if len(st) != 1 || st[0].Dormant == nil || st[0].Dormant.Reason != tt.reason || !st[0].Dormant.DeleteAfter.Equal(start.Add(dormantGrace)) {
+					t.Fatalf("Snapshot = %+v, want the pair dormant: %s", st, tt.reason)
+				}
+				if err := h.tun.Enqueue(hook("Stop"), event("Stop")); !errors.Is(err, ErrNoPair) {
+					t.Errorf("Enqueue while dormant: %v, want ErrNoPair", err)
+				}
+				if _, ok, _ := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAW"), event("PermissionRequest"), time.Hour); ok {
+					t.Error("a decide while dormant answered ok, want no decision at once")
+				}
+			})
+		})
+	}
+}
+
+// A parked pair the relay serves again resumes: hooks reach it, the phone
+// is told to reset, and the recorded start is cleared.
+func TestDormantPairResumesWhenServedAgain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newHarness(t, nil)
 		defer h.stop(t)
 		h.relay.streamErr <- relay.ErrRevoked
 		synctest.Wait()
+		before := len(h.relay.uploaded())
+		time.Sleep(dormantRecheckMin)
+		synctest.Wait()
+		h.relay.events <- relay.Event{Kind: relay.EventPresence, Presence: &relay.Presence{Peer: "phone", State: "connected"}}
+		synctest.Wait()
+		if st := h.tun.Snapshot(); st[0].Dormant != nil {
+			t.Fatalf("still dormant after the relay served the pair: %+v", st[0].Dormant)
+		}
 		h.mu.Lock()
-		revoked := len(h.revoked)
+		dormant := h.dormant
 		h.mu.Unlock()
-		if revoked != 1 {
-			t.Fatalf("OnRevoked fired %d times after a 410 stream, want once", revoked)
+		if len(dormant) != 2 || !dormant[1].IsZero() {
+			t.Errorf("OnDormant = %v, want a start then a clear", dormant)
+		}
+		envs := h.relay.uploaded()[before:]
+		if len(envs) != 1 || h.phone.open(envs[0]).Control != record.ControlReset {
+			t.Errorf("after resuming uploaded %d envelopes, want one reset", len(envs))
+		}
+		if err := h.tun.Enqueue(hook("Stop"), event("Stop")); err != nil {
+			t.Errorf("Enqueue after resuming: %v", err)
 		}
 	})
+}
+
+// The grace counts from the start the pair file recorded, across restarts:
+// a report that has held for longer ends the pair; a younger one parks it
+// without resetting its start.
+func TestDormantGraceCountsFromThePersistedStart(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		age     time.Duration
+		revoked bool
+	}{
+		{"past the grace", dormantGrace + time.Hour, true},
+		{"within the grace", dormantGrace - time.Hour, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				since := time.Now().Add(-tt.age)
+				h := newHarness(t, func(c *PairConfig) { c.RelayRevokedAt = since })
+				defer h.stop(t)
+				h.relay.streamErr <- relay.ErrRevoked
+				synctest.Wait()
+				h.mu.Lock()
+				revoked, dormant := h.revoked, h.dormant
+				h.mu.Unlock()
+				if got := len(revoked) == 1; got != tt.revoked {
+					t.Errorf("OnRevoked = %v, want revoked: %t", revoked, tt.revoked)
+				}
+				if len(dormant) != 0 {
+					t.Errorf("OnDormant = %v, want the persisted start left alone", dormant)
+				}
+				if tt.revoked {
+					if st := h.tun.Snapshot(); len(st) != 0 {
+						t.Errorf("Snapshot = %+v, want the pair gone", st)
+					}
+					return
+				}
+				if st := h.tun.Snapshot(); len(st) != 1 || st[0].Dormant == nil || !st[0].Dormant.Since.Equal(since) {
+					t.Errorf("Snapshot = %+v, want dormant since %v", st, since)
+				}
+			})
+		})
+	}
 }
 
 func TestSetPairsStartsAndStops(t *testing.T) {

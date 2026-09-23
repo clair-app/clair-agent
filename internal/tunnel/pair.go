@@ -35,6 +35,10 @@ type pair struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	// dormantMu orders quarantine and resume, persistence included, so the
+	// pair file never keeps a start time the pair has since left.
+	dormantMu sync.Mutex
+
 	mu         sync.Mutex
 	queue      []item
 	queueBytes int
@@ -42,13 +46,19 @@ type pair struct {
 	counter    *envelope.Counter
 	high       *envelope.HighWater
 	revoked    bool
-	helloAckID string
-	batchN     int
-	unflushed  int
-	flushed    time.Time
-	pendingAck relay.Cursor
-	ackSig     chan struct{}
-	kick       chan struct{}
+	// dormantSince is when the relay began reporting the pair gone, while
+	// the pair is parked; zero otherwise. revokedSince is the same start as
+	// persisted, which a parked pair resumes counting from after a restart.
+	dormantSince  time.Time
+	dormantReason string
+	revokedSince  time.Time
+	helloAckID    string
+	batchN        int
+	unflushed     int
+	flushed       time.Time
+	pendingAck    relay.Cursor
+	ackSig        chan struct{}
+	kick          chan struct{}
 
 	phone       string
 	phoneSeenAt time.Time
@@ -66,6 +76,9 @@ func (p *pair) enqueue(req record.Record, wake envelope.Wake, ttlSec int) error 
 	defer p.mu.Unlock()
 	if p.revoked {
 		return nil
+	}
+	if !p.dormantSince.IsZero() {
+		return errDormant
 	}
 	it, err := p.sealLocked(req, wake, ttlSec)
 	if err != nil {
@@ -132,7 +145,7 @@ func (p *pair) setPolicy(policy record.Presence) {
 func (p *pair) enqueueControl(rec record.Record) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.revoked {
+	if p.revoked || !p.dormantSince.IsZero() {
 		return ""
 	}
 	it, err := p.sealLocked(rec, record.ControlWake, record.TTL(record.ControlWake, 0))
@@ -341,6 +354,86 @@ func (p *pair) revoke(reason string) {
 	p.cancel()
 }
 
+// quarantine parks a pair the relay reports gone: a 410 or `event: revoked`
+// (the pair was revoked) or a 404 (the relay does not know it). None of that
+// is authenticated — whoever answers for the relay can say it — so the pair
+// file, the keys and the hooks stay (ADR 2026-09.9ufb): the pair's holds are
+// let go, its queue dropped, hooks skip it, and the receiver asks again,
+// slowly. Only the phone's own sealed revoke ends a pair at once; reports
+// that hold without a break for dormantGrace end it too, since a real revoke
+// keeps answering 410 for the tombstone's 30 days.
+func (p *pair) quarantine(reason string) {
+	p.dormantMu.Lock()
+	defer p.dormantMu.Unlock()
+	now := p.t.now()
+	p.mu.Lock()
+	if p.revoked {
+		p.mu.Unlock()
+		return
+	}
+	fresh := p.dormantSince.IsZero()
+	persist := fresh && p.revokedSince.IsZero()
+	if fresh {
+		p.dormantSince = p.revokedSince
+		if p.dormantSince.IsZero() {
+			p.dormantSince = now
+		}
+		p.dormantReason = reason
+		p.revokedSince = p.dormantSince
+		p.queue, p.queueBytes = nil, 0
+	}
+	since := p.dormantSince
+	p.mu.Unlock()
+	if now.Sub(since) >= dormantGrace {
+		p.revoke(reason + ", without a break since " + since.UTC().Format(time.RFC3339))
+		return
+	}
+	if !fresh {
+		return
+	}
+	p.abortHolds()
+	p.t.log.Warn("pair dormant: the relay reports it gone; keys and hooks kept until the phone confirms, `clair unpair`, or the grace ends",
+		"pair", p.cfg.ID, "reason", reason, "since", since, "delete_after", since.Add(dormantGrace))
+	if persist && p.t.opts.Hooks.OnDormant != nil {
+		p.t.opts.Hooks.OnDormant(p.cfg.ID, since)
+	}
+}
+
+// resume takes a pair out of quarantine once the relay serves it again,
+// and forgets a persisted start the relay has since contradicted.
+func (p *pair) resume() {
+	p.dormantMu.Lock()
+	defer p.dormantMu.Unlock()
+	p.mu.Lock()
+	was := !p.dormantSince.IsZero()
+	persisted := !p.revokedSince.IsZero()
+	p.dormantSince, p.dormantReason, p.revokedSince = time.Time{}, "", time.Time{}
+	p.mu.Unlock()
+	if persisted && p.t.opts.Hooks.OnDormant != nil {
+		p.t.opts.Hooks.OnDormant(p.cfg.ID, time.Time{})
+	}
+	if was {
+		p.t.log.Info("pair resumed: the relay serves it again", "pair", p.cfg.ID)
+		// The phone may still show decides let go of while parked.
+		p.enqueueControl(record.Record{Kind: record.KindControl, Control: record.ControlReset})
+	}
+}
+
+func (p *pair) dormant() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.dormantSince.IsZero()
+}
+
+// goneReason words a relay's "no such pair" for logs and `clair status`;
+// never the relay's own text.
+func goneReason(err error) string {
+	if errors.Is(err, relay.ErrNotFound) {
+		return "the relay does not know the pair"
+	}
+	return "the relay reports the pair revoked"
+}
+
 // uploader drains the queue: one upload in flight, batches as the relay
 // allows, backoff on failure, halving the batch on 413.
 func (p *pair) uploader(ctx context.Context) {
@@ -370,8 +463,12 @@ func (p *pair) uploader(ctx context.Context) {
 			}
 			switch {
 			case errors.Is(err, relay.ErrRevoked), errors.Is(err, relay.ErrNotFound):
-				p.revoke("the relay refused the pair: " + describe(err))
-				return
+				// The queue is dropped; the uploader idles until a resume.
+				p.quarantine(goneReason(err))
+				if p.isRevoked() {
+					return
+				}
+				continue
 			case errors.Is(err, relay.ErrTooLarge):
 				// Halving is bounded (log2 of the batch), and a lone envelope
 				// is dropped, so this path always progresses.
@@ -444,9 +541,11 @@ func (p *pair) applyReceipt(r relay.Receipt) {
 // itself, so a return here is a refusal or a handler error.
 func (p *pair) receiver(ctx context.Context) {
 	defer p.flushHigh(true)
-	attempt := 0
+	attempt, rechecks := 0, 0
 	for {
-		p.setLink(&p.streamLink, "connected", nil)
+		if !p.dormant() {
+			p.setLink(&p.streamLink, "connected", nil)
+		}
 		began := p.t.now()
 		err := p.cfg.Relay.Stream(ctx, p.cfg.ID, "", p.handle)
 		if ctx.Err() != nil {
@@ -457,14 +556,25 @@ func (p *pair) receiver(ctx context.Context) {
 		if p.t.now().Sub(began) >= streamHealthy {
 			attempt = 0
 		}
-		if errors.Is(err, relay.ErrRevoked) || errors.Is(err, relay.ErrNotFound) {
-			p.revoke("the relay refused the pair: " + describe(err))
-			return
+		if !p.dormant() {
+			rechecks = 0
 		}
-		wait := backoff(attempt)
-		attempt++
-		p.setLink(&p.streamLink, "backoff", err)
-		p.t.log.Warn("stream stopped, retrying", "pair", p.cfg.ID, "attempt", attempt, "after_ms", wait.Milliseconds(), "error", describe(err))
+		var wait time.Duration
+		if errors.Is(err, relay.ErrRevoked) || errors.Is(err, relay.ErrNotFound) {
+			p.quarantine(goneReason(err))
+			if p.isRevoked() {
+				return
+			}
+			wait = min(dormantRecheckMin<<min(rechecks, 4), dormantRecheckMax)
+			rechecks++
+			p.setLink(&p.streamLink, "dormant", err)
+			p.t.log.Info("pair dormant, asking the relay again later", "pair", p.cfg.ID, "after_ms", wait.Milliseconds())
+		} else {
+			wait = backoff(attempt)
+			attempt++
+			p.setLink(&p.streamLink, "backoff", err)
+			p.t.log.Warn("stream stopped, retrying", "pair", p.cfg.ID, "attempt", attempt, "after_ms", wait.Milliseconds(), "error", describe(err))
+		}
 		if sleep(ctx, wait) != nil {
 			return
 		}
@@ -475,12 +585,16 @@ func (p *pair) receiver(ctx context.Context) {
 func (p *pair) handle(_ context.Context, ev relay.Event) error {
 	switch ev.Kind {
 	case relay.EventPresence:
+		// The relay opens every stream it serves with presence: a parked
+		// pair it serves again is back.
+		p.resume()
 		p.setPresence(ev.Presence)
 		return nil
 	case relay.EventRevoked:
-		p.revoke("revoked by the phone")
+		p.quarantine(goneReason(relay.ErrRevoked))
 		return nil
 	case relay.EventEnvelope:
+		p.resume()
 		p.applyEnvelope(ev)
 		return nil
 	default:
@@ -665,5 +779,13 @@ func (p *pair) status() ctl.PairStatus {
 		Stream:           p.streamLink,
 		SkewSec:          int64(p.cfg.Relay.Skew() / time.Second),
 		IdleThresholdSec: int64(p.idleThreshold / time.Second),
+		Dormant:          p.dormantStatusLocked(),
 	}
+}
+
+func (p *pair) dormantStatusLocked() *ctl.Dormant {
+	if p.dormantSince.IsZero() {
+		return nil
+	}
+	return &ctl.Dormant{Reason: p.dormantReason, Since: p.dormantSince, DeleteAfter: p.dormantSince.Add(dormantGrace)}
 }

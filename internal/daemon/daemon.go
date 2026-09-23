@@ -100,7 +100,7 @@ func Run(ctx context.Context, o Options) error {
 
 	d.tunnel = tunnel.New(tunnel.Options{
 		Counters: o.Dir,
-		Hooks:    tunnel.Hooks{OnSnippet: d.onSnippet, OnRevoked: d.onRevoked, OnPolicy: d.onPolicy},
+		Hooks:    tunnel.Hooks{OnSnippet: d.onSnippet, OnRevoked: d.onRevoked, OnPolicy: d.onPolicy, OnDormant: d.onDormant},
 		Logger:   d.log,
 		Now:      d.now,
 		Entropy:  o.Entropy,
@@ -264,6 +264,10 @@ func (d *daemon) Reload(context.Context) error {
 		if err != nil {
 			return fmt.Errorf("daemon: relay for pair %s: %w", p.PairID, err)
 		}
+		var revokedAt time.Time
+		if p.RelayRevokedAt != nil {
+			revokedAt = *p.RelayRevokedAt
+		}
 		configs = append(configs, tunnel.PairConfig{
 			ID:              p.PairID,
 			Keys:            traffic,
@@ -275,6 +279,7 @@ func (d *daemon) Reload(context.Context) error {
 			Hostname:        d.hostname,
 			AgentVersion:    d.opts.Version,
 			IdleThreshold:   idleThreshold(p.IdleThresholdSec),
+			RelayRevokedAt:  revokedAt,
 		})
 	}
 	d.setLoaded(configs)
@@ -284,8 +289,8 @@ func (d *daemon) Reload(context.Context) error {
 func (d *daemon) setLoaded(configs []tunnel.PairConfig) {
 	d.mu.Lock()
 	d.loaded = make(map[string]struct{}, len(configs))
-	for _, c := range configs {
-		d.loaded[c.ID] = struct{}{}
+	for i := range configs {
+		d.loaded[configs[i].ID] = struct{}{}
 	}
 	d.mu.Unlock()
 	d.tunnel.SetPairs(configs)
@@ -339,6 +344,14 @@ func (d *daemon) onPolicy(pairID string, policy record.Presence) {
 	}
 }
 
+// onDormant persists when the relay began reporting a pair gone, or clears
+// it, so the grace period counts across restarts.
+func (d *daemon) onDormant(pairID string, since time.Time) {
+	if err := d.opts.Dir.SetRelayRevokedAt(pairID, since); err != nil {
+		d.log.Warn("dormancy not persisted", "pair", pairID, "error", err.Error())
+	}
+}
+
 // onSnippet installs a hooks block the phone sent. Each install replaces
 // the whole Clair block, so only the latest matters: snippets that arrive
 // while one is being installed collapse into the newest, which the caller
@@ -377,9 +390,10 @@ func (d *daemon) installSnippet(p *pendingSnippet) {
 	d.log.Info("hooks rewritten from the phone's snippet; restart Claude Code", "pair", p.pairID)
 }
 
-// onRevoked forgets a pair the phone or the relay ended; with no pair left
-// the hooks and the host key go too, and the daemon keeps serving 204s
-// until `clair pair` (RELAY.md §6.6).
+// onRevoked forgets a pair the phone ended with its sealed revoke, or the
+// relay reported gone for the whole grace period; with no pair left the
+// hooks and the host key go too, and the daemon keeps serving 204s until
+// `clair pair` (RELAY.md §6.6, ADR 2026-09.9ufb).
 func (d *daemon) onRevoked(pairID, reason string) {
 	d.mu.Lock()
 	delete(d.loaded, pairID)

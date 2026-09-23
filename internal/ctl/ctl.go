@@ -78,6 +78,18 @@ type PairStatus struct {
 	// IdleThresholdSec is the phone's presence threshold; 0 means a bubbled
 	// decide is never released to the terminal.
 	IdleThresholdSec int64 `json:"idleThresholdSec"`
+	// Dormant is set while the relay reports the pair gone (410 or 404): the
+	// pair is parked, its keys and hooks kept, until the relay accepts it
+	// again, the phone confirms, `clair unpair`, or DeleteAfter.
+	Dormant *Dormant `json:"dormant,omitempty"`
+}
+
+// Dormant describes a parked pair.
+type Dormant struct {
+	// Reason is the agent's own wording, never the relay's.
+	Reason      string    `json:"reason"`
+	Since       time.Time `json:"since"`
+	DeleteAfter time.Time `json:"deleteAfter"`
 }
 
 // Link is the state of one relay connection.

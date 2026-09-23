@@ -155,6 +155,14 @@ func TestPrintStatus(t *testing.T) {
 		}
 	}
 	out.Reset()
+	since := time.Date(2026, 9, 20, 8, 0, 0, 0, time.Local)
+	printStatus(&out, ctl.Status{Paired: true, Pairs: []ctl.PairStatus{{PhoneName: "Pixel", Dormant: &ctl.Dormant{
+		Reason: "the relay reports the pair revoked", Since: since, DeleteAfter: since.Add(7 * 24 * time.Hour),
+	}}}})
+	if want := "dormant: the relay reports the pair revoked since 2026-09-20 08:00 — hooks are answered here; run `clair unpair` to confirm, or it is removed after 2026-09-27 08:00"; !strings.Contains(out.String(), want) {
+		t.Errorf("dormant output lacks %q:\n%s", want, out.String())
+	}
+	out.Reset()
 	printStatus(&out, ctl.Status{Unpaired: "revoked by the phone"})
 	for _, want := range []string{"terminal input: no signal", "not paired (revoked by the phone)"} {
 		if !strings.Contains(out.String(), want) {

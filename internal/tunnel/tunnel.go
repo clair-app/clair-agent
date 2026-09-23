@@ -43,6 +43,13 @@ const (
 	// A stream that stayed up for streamHealthy resets the receiver's
 	// backoff (draft).
 	streamHealthy = time.Minute
+	// A pair the relay reports gone is parked and re-checked from
+	// dormantRecheckMin, doubling to dormantRecheckMax; after dormantGrace
+	// of unbroken reports it ends (ADR 2026-09.9ufb). The relay keeps a
+	// revoked pair's tombstone answering 410 for 30 days, well past it.
+	dormantRecheckMin = time.Minute
+	dormantRecheckMax = 15 * time.Minute
+	dormantGrace      = 7 * 24 * time.Hour
 	// Acks are coalesced: the highest applied cursor is sent at most every
 	// ackInterval (§7.4, draft).
 	ackInterval = time.Second
@@ -66,6 +73,9 @@ var ErrNoPair = errors.New("tunnel: no pair")
 
 // errTooLarge marks a record that cannot be sealed under the relay's cap.
 var errTooLarge = errors.New("tunnel: record too large for an envelope")
+
+// errDormant marks a record refused because its pair is parked.
+var errDormant = errors.New("tunnel: pair dormant")
 
 // Relay is the slice of the relay client the tunnel uses; *relay.Client
 // satisfies it and tests fake it.
@@ -105,16 +115,25 @@ type PairConfig struct {
 	// decide is released to the terminal while the host's terminal input has
 	// been idle for less than it. Zero never releases.
 	IdleThreshold time.Duration
+	// RelayRevokedAt is when the relay began reporting the pair gone, from
+	// the pair file; the grace period counts from it across restarts.
+	RelayRevokedAt time.Time
 }
 
 // Hooks are the daemon's callbacks. Each runs on its own goroutine, so a
-// callback may call back into the tunnel.
+// callback may call back into the tunnel — except OnDormant.
 type Hooks struct {
 	// OnSnippet delivers a hooks block the phone sent (RELAY.md §6.5).
 	OnSnippet func(pairID string, snippet json.RawMessage)
-	// OnRevoked fires once when a pair is gone: revoked by the phone, or
-	// refused by the relay with 404/410. The tunnel has already stopped it.
+	// OnRevoked fires once when a pair is over: revoked by the phone's own
+	// sealed record, or reported gone by the relay for dormantGrace without
+	// a break. The tunnel has already stopped it.
 	OnRevoked func(pairID, reason string)
+	// OnDormant records when the relay began reporting a pair gone, or with
+	// the zero time that it accepts the pair again, so the grace period
+	// survives a restart. It runs synchronously, in order, on the pair's
+	// goroutine, and must not call back into the tunnel.
+	OnDormant func(pairID string, since time.Time)
 	// OnPresence reports the phone's stream state (§7.6).
 	OnPresence func(pairID string, connected bool, at time.Time)
 	// OnPolicy delivers a policy record the phone sent (§4.3) after the
@@ -189,8 +208,8 @@ func (t *Tunnel) Run(ctx context.Context) error {
 	t.running = true
 	pending := t.pending
 	t.pending = nil
-	for _, cfg := range pending {
-		t.startLocked(ctx, cfg)
+	for i := range pending {
+		t.startLocked(ctx, pending[i])
 	}
 	if t.opts.Presence != nil {
 		t.wg.Go(func() { t.watcher(ctx) })
@@ -211,9 +230,9 @@ func (t *Tunnel) Run(ctx context.Context) error {
 // stop (their holds are released), known ids are left alone. Before Run it
 // records them for Run to start.
 func (t *Tunnel) SetPairs(pairs []PairConfig) {
-	want := make(map[string]PairConfig, len(pairs))
-	for _, cfg := range pairs {
-		want[cfg.ID] = cfg
+	want := make(map[string]*PairConfig, len(pairs))
+	for i := range pairs {
+		want[pairs[i].ID] = &pairs[i]
 	}
 	var stopped []*pair
 	t.mu.Lock()
@@ -231,7 +250,7 @@ func (t *Tunnel) SetPairs(pairs []PairConfig) {
 	}
 	for id, cfg := range want {
 		if _, have := t.pairs[id]; !have {
-			t.startLocked(t.ctx, cfg)
+			t.startLocked(t.ctx, *cfg)
 		}
 	}
 	t.mu.Unlock()
@@ -244,14 +263,14 @@ func (t *Tunnel) SetPairs(pairs []PairConfig) {
 // Enqueue satisfies hookserver.Sink for fire-and-forget hooks: the record is
 // sealed and queued for every pair. With no pair it is dropped.
 func (t *Tunnel) Enqueue(req record.Record, hook record.Hook) error {
-	pairs := t.livePairs()
+	pairs := t.activePairs()
 	if len(pairs) == 0 {
 		return ErrNoPair
 	}
 	req = stamp(req, t.sample())
 	for _, p := range pairs {
 		wake := record.Wake(req.Path, hook.Event, p.holding())
-		if err := p.enqueue(req, wake, record.TTL(wake, 0)); err != nil && !errors.Is(err, errTooLarge) {
+		if err := p.enqueue(req, wake, record.TTL(wake, 0)); err != nil && !errors.Is(err, errTooLarge) && !errors.Is(err, errDormant) {
 			t.log.Warn("record not queued", "pair", p.cfg.ID, "req_id", req.ReqID, "error", err.Error())
 		}
 	}
@@ -266,7 +285,7 @@ func (t *Tunnel) Enqueue(req record.Record, hook record.Hook) error {
 // `cancel` — and one held while nobody was is released the moment someone
 // comes back.
 func (t *Tunnel) Hold(ctx context.Context, req record.Record, hook record.Hook, timeout time.Duration) (record.Record, bool, error) {
-	pairs := t.livePairs()
+	pairs := t.activePairs()
 	if len(pairs) == 0 {
 		return record.Record{}, false, nil
 	}
@@ -276,7 +295,7 @@ func (t *Tunnel) Hold(ctx context.Context, req record.Record, hook record.Hook, 
 	threshold := thresholdOf(pairs)
 	if bubbled && sample.Present(threshold) {
 		for _, p := range pairs {
-			if err := p.enqueue(req, envelope.WakeSoon, record.TTL(envelope.WakeSoon, 0)); err != nil && !errors.Is(err, errTooLarge) {
+			if err := p.enqueue(req, envelope.WakeSoon, record.TTL(envelope.WakeSoon, 0)); err != nil && !errors.Is(err, errTooLarge) && !errors.Is(err, errDormant) {
 				t.log.Warn("decide not queued", "pair", p.cfg.ID, "req_id", req.ReqID, "error", err.Error())
 			}
 		}
@@ -290,7 +309,7 @@ func (t *Tunnel) Hold(ctx context.Context, req record.Record, hook record.Hook, 
 		p.register(req.ReqID, h)
 		if err := p.enqueue(req, envelope.WakeNow, record.TTL(envelope.WakeNow, timeout)); err == nil {
 			queued = true
-		} else if !errors.Is(err, errTooLarge) {
+		} else if !errors.Is(err, errTooLarge) && !errors.Is(err, errDormant) {
 			t.log.Warn("decide not queued", "pair", p.cfg.ID, "req_id", req.ReqID, "error", err.Error())
 		}
 	}
@@ -495,6 +514,18 @@ func (t *Tunnel) livePairs() []*pair {
 	return out
 }
 
+// activePairs is the pairs hooks go to: the running ones not parked.
+func (t *Tunnel) activePairs() []*pair {
+	pairs := t.livePairs()
+	out := pairs[:0]
+	for _, p := range pairs {
+		if !p.dormant() {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // startLocked starts a pair's goroutines under Run's context (parent). The
 // caller holds t.mu.
 func (t *Tunnel) startLocked(parent context.Context, cfg PairConfig) {
@@ -512,6 +543,7 @@ func (t *Tunnel) startLocked(parent context.Context, cfg PairConfig) {
 		flushed:       t.now(),
 		phone:         "unknown",
 		idleThreshold: cfg.IdleThreshold,
+		revokedSince:  cfg.RelayRevokedAt,
 	}
 	p.counter = envelope.NewCounter(cfg.H2PNext, func(limit uint64) error {
 		return t.opts.Counters.ReserveH2P(cfg.ID, limit)

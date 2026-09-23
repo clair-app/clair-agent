@@ -273,6 +273,10 @@ func printStatus(w io.Writer, st ctl.Status) {
 	for i := range st.Pairs {
 		p := &st.Pairs[i]
 		fmt.Fprintf(w, "paired with %q (fingerprint %s)\n", p.PhoneName, p.Fingerprint)
+		if d := p.Dormant; d != nil {
+			fmt.Fprintf(w, "  dormant: %s since %s — hooks are answered here; run `clair unpair` to confirm, or it is removed after %s\n",
+				d.Reason, d.Since.Local().Format("2006-01-02 15:04"), d.DeleteAfter.Local().Format("2006-01-02 15:04"))
+		}
 		phone := p.Phone
 		if !p.PhoneSeenAt.IsZero() {
 			phone += " since " + p.PhoneSeenAt.Local().Format("15:04:05")

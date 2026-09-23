@@ -361,16 +361,19 @@ func TestEndToEnd(t *testing.T) {
 		return len(w.inst.snippets) == 1 && bytes.Equal(w.inst.snippets[0], snippet)
 	})
 
-	// The phone revokes the pair: hooks and the host key go, the daemon keeps
-	// answering locally.
-	if err := w.phone.client.Revoke(ctx, pairID); err != nil {
-		t.Fatalf("phone revoke: %v", err)
-	}
+	// The phone revokes the pair with its sealed revoke record: hooks and the
+	// host key go, the daemon keeps answering locally. The relay's DELETE
+	// purges the mailbox, so it may only follow once the record was read;
+	// alone it would only park the pair (TestRelayOnlyRevokeKeepsTheHostsState).
+	w.phone.send(ctx, record.Record{Kind: record.KindControl, Control: record.ControlRevoke})
 	waitFor(t, func() bool {
 		w.inst.mu.Lock()
 		defer w.inst.mu.Unlock()
 		return w.inst.uninstall == 1
 	})
+	if err := w.phone.client.Revoke(ctx, pairID); err != nil && !errors.Is(err, relay.ErrRevoked) {
+		t.Fatalf("phone revoke: %v", err)
+	}
 	waitFor(t, func() bool {
 		_, err := w.dir.LoadHostKey()
 		return errors.Is(err, state.ErrNotFound)
@@ -406,6 +409,54 @@ func TestEndToEnd(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("daemon did not stop")
+	}
+}
+
+// TestRelayOnlyRevokeKeepsTheHostsState is AG-3 end to end: a pair the relay
+// reports revoked, with no sealed word from the phone, is parked — hooks
+// answered locally at once — while its file, the host key and the hooks stay.
+func TestRelayOnlyRevokeKeepsTheHostsState(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	ctx := t.Context()
+	if rec := w.phone.next(t); rec.Control != record.ControlHelloAck {
+		t.Fatalf("first record = %+v, want hello-ack", rec)
+	}
+	w.fake.Revoke(pairID)
+	status := func() []byte {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+w.addr+record.PathStatus, http.NoBody)
+		req.Header.Set("Authorization", "Bearer "+w.agent.Token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		return body
+	}
+	waitFor(t, func() bool {
+		return bytes.Contains(status(), []byte(`"dormant":{"reason":"the relay reports the pair revoked"`))
+	})
+	waitFor(t, func() bool {
+		p, err := w.dir.LoadPair(pairID)
+		return err == nil && p.RelayRevokedAt != nil
+	})
+	if _, err := w.dir.LoadHostKey(); err != nil {
+		t.Errorf("host key after a relay-only revoke: %v, want kept", err)
+	}
+	w.inst.mu.Lock()
+	uninstalled := w.inst.uninstall
+	w.inst.mu.Unlock()
+	if uninstalled != 0 {
+		t.Errorf("hooks uninstalled %d times, want kept", uninstalled)
+	}
+	if code, _, _ := w.hook(ctx, t, record.PathDecide, permission); code != http.StatusNoContent {
+		t.Errorf("decide while dormant = %d, want 204 at once", code)
+	}
+	w.stop()
+	if err := <-w.done; err != nil {
+		t.Fatalf("daemon.Run: %v", err)
 	}
 }
 
