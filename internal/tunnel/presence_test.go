@@ -276,12 +276,26 @@ func TestPolicyControlMovesTheThreshold(t *testing.T) {
 		default:
 			t.Fatal("Hold blocked after the threshold moved above the idle time")
 		}
-		// A policy without a threshold leaves it alone.
-		env = h.phone.seal(record.Record{Kind: record.KindControl, Control: record.ControlPolicy, Presence: &record.Presence{}})
+		// A threshold past a day is clamped, here and as persisted (AG-19).
+		huge := 1 << 40
+		env = h.phone.seal(record.Record{Kind: record.KindControl, Control: record.ControlPolicy, Presence: &record.Presence{IdleThresholdSec: &huge}})
 		h.relay.events <- relay.Event{Kind: relay.EventEnvelope, Cursor: "2", Envelope: &env}
 		synctest.Wait()
-		if st := h.tun.Snapshot(); st[0].IdleThresholdSec != 300 {
-			t.Errorf("threshold after an empty policy = %d, want 300", st[0].IdleThresholdSec)
+		h.mu.Lock()
+		policies = h.policies
+		h.mu.Unlock()
+		if last := policies[len(policies)-1]; last.IdleThresholdSec == nil || *last.IdleThresholdSec != presence.MaxThresholdSec {
+			t.Errorf("OnPolicy got %+v, want idleThresholdSec clamped to %d", last, presence.MaxThresholdSec)
+		}
+		if st := h.tun.Snapshot(); st[0].IdleThresholdSec != presence.MaxThresholdSec {
+			t.Errorf("threshold = %d, want %d", st[0].IdleThresholdSec, presence.MaxThresholdSec)
+		}
+		// A policy without a threshold leaves it alone.
+		env = h.phone.seal(record.Record{Kind: record.KindControl, Control: record.ControlPolicy, Presence: &record.Presence{}})
+		h.relay.events <- relay.Event{Kind: relay.EventEnvelope, Cursor: "3", Envelope: &env}
+		synctest.Wait()
+		if st := h.tun.Snapshot(); st[0].IdleThresholdSec != presence.MaxThresholdSec {
+			t.Errorf("threshold after an empty policy = %d, want it left at %d", st[0].IdleThresholdSec, presence.MaxThresholdSec)
 		}
 	})
 }

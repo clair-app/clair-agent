@@ -128,6 +128,10 @@ func (p *pair) threshold() time.Duration {
 
 // setPolicy applies a policy record from the phone (§4.3).
 func (p *pair) setPolicy(policy record.Presence) {
+	if policy.IdleThresholdSec != nil {
+		sec := presence.ClampThresholdSec(*policy.IdleThresholdSec)
+		policy.IdleThresholdSec = &sec
+	}
 	p.mu.Lock()
 	if policy.IdleThresholdSec != nil {
 		p.idleThreshold = time.Duration(*policy.IdleThresholdSec) * time.Second

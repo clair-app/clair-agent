@@ -21,6 +21,7 @@ import (
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/envelope"
 	"claircode.app/clair-agent/internal/identity"
+	"claircode.app/clair-agent/internal/presence"
 	"claircode.app/clair-agent/internal/record"
 	"claircode.app/clair-agent/internal/relay"
 	"claircode.app/clair-agent/internal/relay/relaytest"
@@ -246,6 +247,10 @@ type world struct {
 	mu        sync.Mutex
 	installed []json.RawMessage
 	uninstall int
+	// helloN and helloThreshold override what the scanning phone's hello
+	// says; zero keeps n=1 and 90 s.
+	helloN         uint64
+	helloThreshold int
 }
 
 func newWorld(t *testing.T) *world {
@@ -335,8 +340,14 @@ func (w *world) scan(t *testing.T, link string, wrongK bool, snippet json.RawMes
 	if err != nil {
 		t.Fatal(err)
 	}
-	threshold := 90
-	hello := record.Record{N: 1, Kind: record.KindControl, Control: record.ControlHello, Name: "Pixel 9 Pro", Snippet: snippet, Presence: &record.Presence{IdleThresholdSec: &threshold}}
+	threshold, n := 90, uint64(1)
+	if w.helloThreshold != 0 {
+		threshold = w.helloThreshold
+	}
+	if w.helloN != 0 {
+		n = w.helloN
+	}
+	hello := record.Record{N: n, Kind: record.KindControl, Control: record.ControlHello, Name: "Pixel 9 Pro", Snippet: snippet, Presence: &record.Presence{IdleThresholdSec: &threshold}}
 	plain, _ := record.Marshal(&hello)
 	id, _ := envelope.NewID(time.Now(), rand.Reader)
 	env, err := envelope.Seal(traffic.Key(envelope.DirP2H), envelope.Header{Pair: payload.PairingIDString(), ID: id, Dir: envelope.DirP2H, Wake: envelope.WakeSoon, TTLSec: 600}, plain, rand.Reader)
@@ -523,6 +534,102 @@ func TestPairReplacesAnExistingPair(t *testing.T) {
 	oldClient, _ := relay.New(oldHost.Auth(), relay.Options{BaseURL: w.fake.URL})
 	if err := oldClient.Ack(t.Context(), old.PairID, "1"); !errors.Is(err, relay.ErrRevoked) {
 		t.Errorf("old pair not revoked at the relay: %v", err)
+	}
+}
+
+// A replace that does not complete — the phone declined, the code expired
+// — leaves the old pairs and the host key exactly as they were (AG-19).
+func TestReplaceKeepsTheOldStateUntilTheNewPairingIsAccepted(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []string{"declined", "expired"} {
+		t.Run(tt, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			oldHost, _, err := w.dir.EnsureHostKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := state.Pair{PairID: "BBBBBBBBBBBBBBBBBBBBBB", Relay: w.fake.URL, PhoneName: "Old phone", CreatedAt: time.Now()}
+			old.SetKeys(&envelope.Keys{})
+			if err := w.dir.SavePair(old); err != nil {
+				t.Fatal(err)
+			}
+			w.fake.AddPair(old.PairID, base64.RawURLEncoding.EncodeToString(oldHost.AuthPublic()), "phone")
+			opts := w.options()
+			opts.Replace = true
+			switch tt {
+			case "declined":
+				w.term.answers = []bool{false}
+				done := make(chan error, 1)
+				go func() { done <- Pair(t.Context(), opts) }()
+				w.scan(t, w.link(t), false, nil)
+				if err := <-done; !errors.Is(err, ErrDeclined) {
+					t.Fatalf("Pair: err = %v, want ErrDeclined", err)
+				}
+			case "expired":
+				script := &scriptedRelay{
+					mint: func() (relay.Pairing, error) {
+						return relay.Pairing{ID: "AAAAAAAAAAAAAAAAAAAAAA", ExpiresAt: time.Now().Add(10 * time.Minute)}, nil
+					},
+					wait: func() (relay.Completed, error) { return relay.Completed{}, relay.ErrPairingExpired },
+				}
+				opts.NewRelay = func(string, ed25519.PrivateKey) (Relay, error) { return script, nil }
+				if err := Pair(t.Context(), opts); err == nil {
+					t.Fatal("Pair with an expired code: want an error")
+				}
+			}
+			if pairs, _ := w.dir.ListPairs(); len(pairs) != 1 || pairs[0].PairID != old.PairID {
+				t.Errorf("pairs = %+v, want the old one untouched", pairs)
+			}
+			if host, err := w.dir.LoadHostKey(); err != nil || !bytes.Equal(host.AuthPublic(), oldHost.AuthPublic()) {
+				t.Errorf("host key after a %s replace: %v; want the old one kept", tt, err)
+			}
+			if len(w.daemon.released) != 0 {
+				t.Errorf("daemon released %v, want nothing", w.daemon.released)
+			}
+			oldClient, _ := relay.New(oldHost.Auth(), relay.Options{BaseURL: w.fake.URL})
+			if err := oldClient.Ack(t.Context(), old.PairID, "1"); errors.Is(err, relay.ErrRevoked) {
+				t.Error("the old pair was revoked at the relay by a replace that did not complete")
+			}
+		})
+	}
+}
+
+// What the phone's hello says about counters and presence is bounded: an
+// absurd counter refuses the pair, an absurd threshold is clamped (AG-19).
+func TestPairBoundsWhatTheHelloSays(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	w.helloN = maxHelloN + 1
+	done := make(chan error, 1)
+	go func() { done <- Pair(t.Context(), w.options()) }()
+	ph := w.scan(t, w.link(t), false, nil)
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "claims n=") {
+		t.Fatalf("Pair with hello n=%d: err = %v", w.helloN, err)
+	}
+	if pairs, _ := w.dir.ListPairs(); len(pairs) != 0 {
+		t.Error("a hello with an absurd counter wrote a pair file")
+	}
+	if err := ph.client.Ack(t.Context(), ph.pairID, "1"); !errors.Is(err, relay.ErrRevoked) {
+		t.Errorf("refused pair not revoked at the relay: %v", err)
+	}
+
+	w2 := newWorld(t)
+	w2.helloThreshold = 1 << 40
+	done2 := make(chan error, 1)
+	go func() { done2 <- Pair(t.Context(), w2.options()) }()
+	ph2 := w2.scan(t, w2.link(t), false, nil)
+	if err := <-done2; err != nil {
+		t.Fatalf("Pair: %v", err)
+	}
+	p, err := w2.dir.LoadPair(ph2.pairID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.IdleThresholdSec == nil || *p.IdleThresholdSec != presence.MaxThresholdSec {
+		t.Errorf("persisted threshold = %v, want %d", p.IdleThresholdSec, presence.MaxThresholdSec)
 	}
 }
 

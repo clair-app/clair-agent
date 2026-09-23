@@ -29,6 +29,15 @@ func TestPresent(t *testing.T) {
 	}
 }
 
+func TestClampThresholdSec(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[int]int{-5: 0, 0: 0, 90: 90, MaxThresholdSec: MaxThresholdSec, 1 << 40: MaxThresholdSec} {
+		if got := ClampThresholdSec(in); got != want {
+			t.Errorf("ClampThresholdSec(%d) = %d, want %d", in, got, want)
+		}
+	}
+}
+
 func TestFunc(t *testing.T) {
 	t.Parallel()
 	f := Func(func() Sample { return Sample{Idle: time.Second, Known: true, Source: "fake"} })

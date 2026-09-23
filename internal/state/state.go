@@ -278,14 +278,19 @@ func (d *Dir) ReplaceHostKey(entropy io.Reader) (*identity.Keys, error) {
 	if err != nil {
 		return nil, fmt.Errorf("state: %w", err)
 	}
-	data, err := identity.Marshal(keys)
-	if err != nil {
-		return nil, fmt.Errorf("state: %w", err)
-	}
-	if err := d.write(hostKeyFile, data); err != nil {
+	if err := d.SaveHostKey(keys); err != nil {
 		return nil, err
 	}
 	return keys, nil
+}
+
+// SaveHostKey writes host.key, replacing any.
+func (d *Dir) SaveHostKey(keys *identity.Keys) error {
+	data, err := identity.Marshal(keys)
+	if err != nil {
+		return fmt.Errorf("state: %w", err)
+	}
+	return d.write(hostKeyFile, data)
 }
 
 // DeleteHostKey removes host.key; a missing file is fine.

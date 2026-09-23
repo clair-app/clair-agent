@@ -17,6 +17,16 @@ import "time"
 // until the phone says otherwise (`hello` / `policy`, RELAY.md §4.3; draft).
 const DefaultThreshold = 120 * time.Second
 
+// MaxThresholdSec caps a phone's threshold at a day: past it "present"
+// means nothing, and seconds that large overflow a time.Duration.
+const MaxThresholdSec = 24 * 60 * 60
+
+// ClampThresholdSec bounds a phone-sent threshold to [0, MaxThresholdSec];
+// 0 stays "never release".
+func ClampThresholdSec(sec int) int {
+	return min(max(sec, 0), MaxThresholdSec)
+}
+
 // Sample is one reading.
 type Sample struct {
 	// Idle is the time since a terminal of this user's last read input.

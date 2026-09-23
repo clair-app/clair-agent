@@ -331,7 +331,7 @@ func idleThreshold(sec *int) time.Duration {
 	if sec == nil {
 		return presence.DefaultThreshold
 	}
-	return time.Duration(*sec) * time.Second
+	return time.Duration(presence.ClampThresholdSec(*sec)) * time.Second
 }
 
 // onPolicy persists a policy record the tunnel already applied.

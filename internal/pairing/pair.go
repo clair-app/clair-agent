@@ -13,6 +13,8 @@ import (
 
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/envelope"
+	"claircode.app/clair-agent/internal/identity"
+	"claircode.app/clair-agent/internal/presence"
 	"claircode.app/clair-agent/internal/record"
 	"claircode.app/clair-agent/internal/relay"
 	"claircode.app/clair-agent/internal/state"
@@ -26,6 +28,9 @@ const (
 	// Waiting on the relay lasts the pairing's life plus waitGrace, so the
 	// relay's own 410 is what the user sees rather than a local timeout.
 	waitGrace = 30 * time.Second
+	// A new pair's first phone record has n under maxHelloN: the phone
+	// starts each pair's counter at 1, within its first reserved block.
+	maxHelloN = envelope.CounterBlock
 )
 
 // Errors a caller can test with errors.Is.
@@ -106,15 +111,17 @@ func Pair(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	if len(existing) > 0 {
+	replacing := len(existing) > 0
+	if replacing {
 		if err = o.confirmReplace(ctx, existing); err != nil {
 			return err
 		}
-		if err = o.releaseAll(ctx, existing); err != nil {
-			return err
-		}
 	}
-	host, err := o.hostKey(len(existing) > 0)
+	// A replace pairs under a new host key (§6.6) that is saved, and the old
+	// pairs revoked, only once the new pairing is proven and accepted: a
+	// code that expires or a phone that is declined leaves the host as it
+	// was (AG-19).
+	host, err := o.hostKey(replacing)
 	if err != nil {
 		return err
 	}
@@ -175,6 +182,10 @@ func Pair(ctx context.Context, o Options) error {
 		_ = client.Revoke(ctx, completed.PairID)
 		return fmt.Errorf("%w: %w", ErrNotThisPhone, err)
 	}
+	if hello.N > maxHelloN {
+		_ = client.Revoke(ctx, completed.PairID)
+		return fmt.Errorf("pairing: the phone's hello claims n=%d; a new pair's first record is under %d", hello.N, maxHelloN)
+	}
 	name := hello.Name
 	if name == "" {
 		name = "an unnamed phone"
@@ -191,6 +202,15 @@ func Pair(ctx context.Context, o Options) error {
 	} else {
 		fmt.Fprintf(o.Stdout, "Pairing with %q.\n", name)
 	}
+	if replacing {
+		if err := o.releaseAll(ctx, existing); err != nil {
+			_ = client.Revoke(ctx, completed.PairID)
+			return err
+		}
+		if err := o.Dir.SaveHostKey(host); err != nil {
+			return err
+		}
+	}
 
 	pair := state.Pair{
 		PairID:    completed.PairID,
@@ -201,8 +221,9 @@ func Pair(ctx context.Context, o Options) error {
 		P2HLast:   hello.N,
 		H2PNext:   2, // the hello-ack takes n=1
 	}
-	if hello.Presence != nil {
-		pair.IdleThresholdSec = hello.Presence.IdleThresholdSec
+	if hello.Presence != nil && hello.Presence.IdleThresholdSec != nil {
+		sec := presence.ClampThresholdSec(*hello.Presence.IdleThresholdSec)
+		pair.IdleThresholdSec = &sec
 	}
 	pair.SetKeys(keys)
 	if err := o.sendHelloAck(ctx, client, keys, completed.PairID); err != nil {
@@ -281,12 +302,12 @@ func (o Options) releasePair(ctx context.Context, pairID string) error {
 	return o.Dir.DeletePair(pairID)
 }
 
-// hostKey returns the host's keys: new ones after a replace (§6.6), else
-// whatever is there, created on first use.
+// hostKey returns the host's keys: new, not yet saved ones for a replace
+// (§6.6) — Pair saves them once the new pairing is accepted — else whatever
+// is there, created on first use.
 func (o Options) hostKey(replace bool) (*identityKeys, error) {
 	if replace {
-		keys, err := o.Dir.ReplaceHostKey(o.Entropy)
-		return keys, err
+		return identity.Generate(o.Entropy)
 	}
 	keys, _, err := o.Dir.EnsureHostKey(o.Entropy)
 	return keys, err
