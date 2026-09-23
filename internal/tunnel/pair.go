@@ -364,12 +364,17 @@ func (p *pair) revoke(reason string) bool {
 }
 
 // forgetOnRelay deletes a pair the phone ended with its sealed revoke once
-// the pair has stopped — its last ack, the record's, sent — so the relay
-// keeps nothing for it even if the phone's own DELETE never landed. The
-// phone's DELETE usually has, so a 410 is the expected answer; it is best
-// effort and bounded (ADR 2026-09.69ym).
+// the pair has stopped and the record is acked, so the relay keeps nothing
+// for it even if the phone's own DELETE never landed. The phone's DELETE
+// usually has, so a 410 is the expected answer; each call is best effort
+// and bounded (ADR 2026-09.69ym).
 func (p *pair) forgetOnRelay() {
 	p.wg.Wait()
+	// The record's ack is recorded once it is applied, which may be after
+	// the acker's last flush: the revoke stopped the acker too.
+	ackCtx, cancelAck := context.WithTimeout(context.WithoutCancel(p.ctx), relayTidyTimeout)
+	p.flushAck(ackCtx)
+	cancelAck()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(p.ctx), relayTidyTimeout)
 	defer cancel()
 	switch err := p.cfg.Relay.Revoke(ctx, p.cfg.ID); {
