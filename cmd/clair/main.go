@@ -66,11 +66,24 @@ func main() {
 
 // run is main without the process: arguments in, exit status out, so the
 // dispatch is testable without forking. Long-running commands stop on
-// SIGINT/SIGTERM.
+// SIGINT, SIGTERM and SIGHUP.
 func run(args []string, stdout, stderr io.Writer) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), stopSignals()...)
 	defer stop()
 	return runWith(ctx, deps{getenv: os.Getenv, now: time.Now, entropy: rand.Reader, stdin: os.Stdin, exe: os.Executable, home: os.UserHomeDir}, args, stdout, stderr)
+}
+
+// stopSignals are the signals that end a command through its context, so it
+// can clean up — `clair pair` revokes a pair it has not saved (ADR
+// 2026-09.mwfw). SIGHUP, a closed terminal, is one unless it is ignored
+// (nohup): Notify would undo that and stop a daemon meant to outlive its
+// terminal. Windows never delivers SIGHUP.
+func stopSignals() []os.Signal {
+	sigs := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		sigs = append(sigs, syscall.SIGHUP)
+	}
+	return sigs
 }
 
 // runWith is run with its dependencies supplied; ctx ends a long-running command.

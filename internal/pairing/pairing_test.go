@@ -172,17 +172,24 @@ func TestParseYesNo(t *testing.T) {
 	}
 }
 
-// fakeTerm answers prompts from a script and records them.
+// fakeTerm answers prompts from a script and records them; onConfirm, when
+// set, runs first and its error is the answer's.
 type fakeTerm struct {
-	mu      sync.Mutex
-	answers []bool
-	prompts []string
+	mu        sync.Mutex
+	answers   []bool
+	prompts   []string
+	onConfirm func(ctx context.Context) error
 }
 
-func (f *fakeTerm) Confirm(_ context.Context, prompt string, def bool) (bool, error) {
+func (f *fakeTerm) Confirm(ctx context.Context, prompt string, def bool) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prompts = append(f.prompts, prompt)
+	if f.onConfirm != nil {
+		if err := f.onConfirm(ctx); err != nil {
+			return false, err
+		}
+	}
 	if len(f.answers) == 0 {
 		return def, nil
 	}
@@ -485,6 +492,137 @@ func TestPairDeclinedAndHeadless(t *testing.T) {
 	}
 	if out := w2.stdout.String(); !strings.Contains(out, `Pairing with "Pixel 9 Pro"`) || !strings.Contains(out, "clair daemon") {
 		t.Errorf("headless stdout:\n%s", out)
+	}
+}
+
+// interruptingRelay is the relay client whose first upload — the
+// hello-ack — is cut short by an interrupt: the command's context ends, as
+// on Ctrl-C, and nothing reaches the relay.
+type interruptingRelay struct {
+	Relay
+
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	cut    bool
+}
+
+func (r *interruptingRelay) Upload(ctx context.Context, pair string, envs []envelope.Envelope) (relay.Receipt, error) {
+	r.mu.Lock()
+	first := !r.cut
+	r.cut = true
+	r.mu.Unlock()
+	if first {
+		r.cancel()
+		return relay.Receipt{}, ctx.Err()
+	}
+	return r.Relay.Upload(ctx, pair, envs)
+}
+
+// controls opens the host's records in a pair's mailbox with the phone's key.
+func controls(t *testing.T, w *world, ph *phone) []string {
+	t.Helper()
+	rows := w.fake.Rows(ph.pairID, envelope.DirH2P)
+	out := make([]string, 0, len(rows))
+	for _, env := range rows {
+		plain, err := envelope.Open(ph.traffic.Key(envelope.DirH2P), env)
+		if err != nil {
+			t.Fatalf("a host record does not open with the phone's key: %v", err)
+		}
+		rec, err := record.Unmarshal(plain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, fmt.Sprintf("%s n=%d", rec.Control, rec.N))
+	}
+	return out
+}
+
+// Every way out of `clair pair` between the relay's completion and the
+// saved pair file revokes the pair at the relay — on a context of its own,
+// as the command's may be what ended — and once the phone may hold the
+// hello-ack, sends it a sealed revoke first (ADR 2026-09.mwfw).
+func TestAnUnfinishedPairingIsRevoked(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		setup        func(w *world, opts *Options, cancel context.CancelFunc)
+		wantErr      string
+		wantControls []string
+	}{
+		{
+			name:    "declined",
+			setup:   func(w *world, _ *Options, _ context.CancelFunc) { w.term.answers = []bool{false} },
+			wantErr: ErrDeclined.Error(),
+		},
+		{
+			name: "the terminal fails",
+			setup: func(w *world, _ *Options, _ context.CancelFunc) {
+				w.term.onConfirm = func(context.Context) error { return errors.New("pairing: read terminal: input/output error") }
+			},
+			wantErr: "read terminal",
+		},
+		{
+			name: "interrupted at the prompt",
+			setup: func(w *world, _ *Options, cancel context.CancelFunc) {
+				w.term.onConfirm = func(ctx context.Context) error { cancel(); return ctx.Err() }
+			},
+			wantErr: "interrupted before the pair was saved",
+		},
+		{
+			name: "interrupted during the hello-ack",
+			setup: func(_ *world, opts *Options, cancel context.CancelFunc) {
+				opts.NewRelay = func(baseURL string, auth ed25519.PrivateKey) (Relay, error) {
+					c, err := relay.New(auth, relay.Options{BaseURL: baseURL})
+					return &interruptingRelay{Relay: c, cancel: cancel}, err
+				}
+			},
+			wantErr:      "interrupted before the pair was saved",
+			wantControls: []string{"revoke n=2"},
+		},
+		{
+			name: "the pair file cannot be saved",
+			setup: func(w *world, _ *Options, _ context.CancelFunc) {
+				pairs := filepath.Join(w.dir.Path(), "pairs")
+				w.term.onConfirm = func(context.Context) error {
+					if err := os.RemoveAll(pairs); err != nil {
+						return err
+					}
+					return os.WriteFile(pairs, nil, 0o600)
+				}
+			},
+			wantErr:      "pairs",
+			wantControls: []string{"hello-ack n=1", "revoke n=2"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			opts := w.options()
+			tt.setup(w, &opts, cancel)
+			done := make(chan error, 1)
+			go func() { done <- Pair(ctx, opts) }()
+			ph := w.scan(t, w.link(t), false, nil)
+			err := <-done
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Pair: err = %v, want one containing %q", err, tt.wantErr)
+			}
+			if pairs, _ := w.dir.ListPairs(); len(pairs) != 0 {
+				t.Errorf("pairs = %+v, want none", pairs)
+			}
+			if err := ph.client.Ack(t.Context(), ph.pairID, "1"); !errors.Is(err, relay.ErrRevoked) {
+				t.Errorf("the phone's next call: err = %v, want ErrRevoked", err)
+			}
+			if got := controls(t, w, ph); strings.Join(got, ", ") != strings.Join(tt.wantControls, ", ") {
+				t.Errorf("records for the phone = %q, want %q", got, tt.wantControls)
+			}
+			if len(w.installed) != 0 {
+				t.Error("hooks were installed for a pair that was not kept")
+			}
+		})
 	}
 }
 

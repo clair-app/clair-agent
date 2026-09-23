@@ -32,6 +32,12 @@ const (
 	// A new pair's first phone record has n under maxHelloN: the phone
 	// starts each pair's counter at 1, within its first reserved block.
 	maxHelloN = envelope.CounterBlock
+	// A pair the relay completed but this host does not keep is revoked
+	// within abandonTimeout, on a context of its own: the command's may be
+	// what ended. The sealed revoke gets abandonUploadTimeout of it, so the
+	// DELETE always has time (ADR 2026-09.mwfw).
+	abandonTimeout       = 5 * time.Second
+	abandonUploadTimeout = 2 * time.Second
 )
 
 // Errors a caller can test with errors.Is.
@@ -176,6 +182,12 @@ func Pair(ctx context.Context, o Options) error {
 		}
 		return describeRelayError("wait for the phone", err)
 	}
+	// The relay now holds a pair the phone may already show. Until its file
+	// is saved, every way out — an impostor, a no, Ctrl-C, a hangup, a
+	// terminal or a disk that fails — revokes it, so neither end keeps an
+	// orphan (ADR 2026-09.mwfw).
+	unfinished := &unfinishedPair{client: client, pairID: completed.PairID}
+	defer o.abandon(ctx, unfinished)
 
 	keys, err := envelope.Derive(host.Agreement(), completed.PhonePub, payload.K[:])
 	if err != nil {
@@ -183,13 +195,11 @@ func Pair(ctx context.Context, o Options) error {
 	}
 	hello, err := openHello(keys, completed)
 	if err != nil {
-		// Whoever completed the pairing does not know k. Close the pair so
-		// they get nothing further, and say so.
-		_ = client.Revoke(ctx, completed.PairID)
+		// Whoever completed the pairing does not know k: the revoke gives
+		// them nothing further.
 		return fmt.Errorf("%w: %w", ErrNotThisPhone, err)
 	}
 	if hello.N > maxHelloN {
-		_ = client.Revoke(ctx, completed.PairID)
 		return fmt.Errorf("pairing: the phone's hello claims n=%d; a new pair's first record is under %d", hello.N, maxHelloN)
 	}
 	name := hello.Name
@@ -199,10 +209,9 @@ func Pair(ctx context.Context, o Options) error {
 	if o.Term != nil && !o.Yes {
 		ok, err := o.Term.Confirm(ctx, fmt.Sprintf("Pair with %q?", name), true)
 		if err != nil {
-			return err
+			return interrupted(ctx, err)
 		}
 		if !ok {
-			_ = client.Revoke(ctx, completed.PairID)
 			return ErrDeclined
 		}
 	} else {
@@ -210,8 +219,7 @@ func Pair(ctx context.Context, o Options) error {
 	}
 	if replacing {
 		if err := o.releaseAll(ctx, existing); err != nil {
-			_ = client.Revoke(ctx, completed.PairID)
-			return err
+			return interrupted(ctx, err)
 		}
 		if err := o.Dir.SaveHostKey(host); err != nil {
 			return err
@@ -232,13 +240,21 @@ func Pair(ctx context.Context, o Options) error {
 		pair.IdleThresholdSec = &sec
 	}
 	pair.SetKeys(keys)
-	if err := o.sendHelloAck(ctx, client, keys, completed.PairID); err != nil {
+	// From here the phone may hold the hello-ack, and an abandoned pair is
+	// ended with a sealed revoke as well.
+	unfinished.acked = keys
+	if err := o.sendHelloAck(ctx, client, keys, completed.PairID); err != nil && ctx.Err() == nil {
 		fmt.Fprintf(o.Stderr, "clair pair: the hello-ack did not reach the relay (%v); the daemon will send it.\n", err)
 		pair.PendingHelloAck = true
+	}
+	if err := ctx.Err(); err != nil {
+		return interrupted(ctx, err)
 	}
 	if err := o.Dir.SavePair(pair); err != nil {
 		return err
 	}
+	unfinished.kept = true
+
 	report, installErr := o.Install(hello.Snippet)
 	for _, w := range report.Warnings() {
 		fmt.Fprintf(o.Stderr, "clair pair: %s.\n", w)
@@ -261,6 +277,53 @@ func Pair(ctx context.Context, o Options) error {
 	o.reloadDaemon(ctx)
 	fmt.Fprintf(o.Stdout, "Paired with %q. Fingerprint: %s\nRestart any running Claude Code session to pick up the hooks.\n", name, keys.Fingerprint())
 	return nil
+}
+
+// unfinishedPair is a pair the relay completed and this host has not saved.
+type unfinishedPair struct {
+	client Relay
+	pairID string
+	// acked holds the traffic keys once a hello-ack may have reached the
+	// relay; kept is set once the pair file is saved.
+	acked *envelope.Keys
+	kept  bool
+}
+
+// abandon revokes an unfinished pair at the relay, best effort, on a
+// context of its own bounded to abandonTimeout: the command's may be what
+// ended. A phone still waiting for its hello-ack drops a pair the relay
+// reports revoked; one that may have read the hello-ack gets a sealed
+// revoke first, which ends the pair on the phone instead of parking it
+// (RELAY.md §6.6; ADR 2026-09.mwfw).
+func (o Options) abandon(ctx context.Context, p *unfinishedPair) {
+	if p.kept {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abandonTimeout)
+	defer cancel()
+	if p.acked != nil {
+		env, err := o.sealControl(p.acked, p.pairID, record.Record{N: 2, Kind: record.KindControl, Control: record.ControlRevoke})
+		if err == nil {
+			uploadCtx, cancelUpload := context.WithTimeout(ctx, abandonUploadTimeout)
+			_, err = p.client.Upload(uploadCtx, p.pairID, []envelope.Envelope{env})
+			cancelUpload()
+		}
+		if err != nil {
+			fmt.Fprintf(o.Stderr, "clair pair: the phone was not sent the revoke (%v); it will see the pair gone.\n", err)
+		}
+	}
+	if err := p.client.Revoke(ctx, p.pairID); err != nil && !errors.Is(err, relay.ErrRevoked) && !errors.Is(err, relay.ErrNotFound) {
+		fmt.Fprintf(o.Stderr, "clair pair: the relay did not drop the unfinished pair %s: %v\n", p.pairID, err)
+	}
+}
+
+// interrupted names a way out that ended the command — Ctrl-C, SIGTERM,
+// a hangup — for what it is, rather than as the error it caused.
+func interrupted(ctx context.Context, err error) error {
+	if ctx.Err() == nil {
+		return err
+	}
+	return fmt.Errorf("pairing: interrupted before the pair was saved; it was not kept (%w)", context.Cause(ctx))
 }
 
 // confirmReplace asks before replacing an existing pair.
@@ -357,18 +420,7 @@ func openHello(keys *envelope.Keys, completed relay.Completed) (*record.Record, 
 
 // sendHelloAck uploads the hello-ack as the pair's first host record.
 func (o Options) sendHelloAck(ctx context.Context, client Relay, keys *envelope.Keys, pairID string) error {
-	rec := record.Record{N: 1, Kind: record.KindControl, Control: record.ControlHelloAck, Hostname: o.Hostname, AgentVersion: o.AgentVersion}
-	plain, err := record.Marshal(&rec)
-	if err != nil {
-		return err
-	}
-	id, err := envelope.NewID(o.Now(), o.Entropy)
-	if err != nil {
-		return err
-	}
-	env, err := envelope.Seal(keys.Key(envelope.DirH2P), envelope.Header{
-		Pair: pairID, ID: id, Dir: envelope.DirH2P, Wake: record.ControlWake, TTLSec: record.TTL(record.ControlWake, 0),
-	}, plain, o.Entropy)
+	env, err := o.sealControl(keys, pairID, record.Record{N: 1, Kind: record.KindControl, Control: record.ControlHelloAck, Hostname: o.Hostname, AgentVersion: o.AgentVersion})
 	if err != nil {
 		return err
 	}
@@ -386,6 +438,21 @@ func (o Options) sendHelloAck(ctx context.Context, client Relay, keys *envelope.
 		}
 	}
 	return err
+}
+
+// sealControl seals a control record from the host to the phone.
+func (o Options) sealControl(keys *envelope.Keys, pairID string, rec record.Record) (envelope.Envelope, error) {
+	plain, err := record.Marshal(&rec)
+	if err != nil {
+		return envelope.Envelope{}, err
+	}
+	id, err := envelope.NewID(o.Now(), o.Entropy)
+	if err != nil {
+		return envelope.Envelope{}, err
+	}
+	return envelope.Seal(keys.Key(envelope.DirH2P), envelope.Header{
+		Pair: pairID, ID: id, Dir: envelope.DirH2P, Wake: record.ControlWake, TTLSec: record.TTL(record.ControlWake, 0),
+	}, plain, o.Entropy)
 }
 
 // reloadDaemon tells a running daemon to pick the pair up, or says how to start one.

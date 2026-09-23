@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -184,5 +187,19 @@ func TestNewLoggerLevels(t *testing.T) {
 	}
 	if _, err := newLogger(&bytes.Buffer{}, "", "warn"); err != nil {
 		t.Errorf("newLogger with the file's level: %v", err)
+	}
+}
+
+// A hangup ends a command through its context like Ctrl-C does, so `clair
+// pair` can revoke what it has not saved — unless SIGHUP is ignored (nohup).
+func TestStopSignalsIncludeTheHangup(t *testing.T) {
+	t.Parallel()
+
+	sigs := stopSignals()
+	if !slices.Contains(sigs, os.Interrupt) || !slices.Contains(sigs, os.Signal(syscall.SIGTERM)) {
+		t.Errorf("stopSignals = %v, want SIGINT and SIGTERM", sigs)
+	}
+	if got, want := slices.Contains(sigs, os.Signal(syscall.SIGHUP)), !signal.Ignored(syscall.SIGHUP); got != want {
+		t.Errorf("SIGHUP in stopSignals = %v, want %v (ignored: %v)", got, want, !want)
 	}
 }
