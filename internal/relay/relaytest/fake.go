@@ -929,10 +929,13 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID
 		superseded := *p.owner(role) != mine
 		peer := peerOf(role)
 		peerOpen := *p.owner(peer) != 0
+		// A copy: acks and revokes compact f.rows in place once the lock
+		// is let go.
 		var next *row
 		for i := range f.rows {
 			if f.rows[i].pair == pairID && f.rows[i].dir == inbound && f.rows[i].cursor > last {
-				next = &f.rows[i]
+				found := f.rows[i]
+				next = &found
 				break
 			}
 		}
