@@ -359,6 +359,25 @@ func (d *Dir) DeletePair(id string) error {
 	return d.remove(pairFile(id))
 }
 
+// TakePair reads a pair file and deletes it in one step, under the lock the
+// counter updates take, for a caller sealing the pair's last record from it
+// (`clair unpair`, `clair pair --replace`): with the file gone, no counter
+// can reserve another block from it, so its H2PNext is an `n` no record of
+// the pair has used or ever will. The daemon must have let the pair go
+// first (ADR 2026-09.r7kd); a missing file is ErrNotFound.
+func (d *Dir) TakePair(id string) (Pair, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	p, err := d.LoadPair(id)
+	if err != nil {
+		return Pair{}, err
+	}
+	if err := d.remove(pairFile(id)); err != nil {
+		return Pair{}, err
+	}
+	return p, nil
+}
+
 // ReserveH2P persists the sender counter's new limit before the daemon uses
 // the block below it (envelope.Counter's reserve callback). It never lowers
 // the limit.

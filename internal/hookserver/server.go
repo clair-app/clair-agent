@@ -56,7 +56,8 @@ type Sink interface {
 type Controller interface {
 	Status(ctx context.Context) ctl.Status
 	Reload(ctx context.Context) error
-	// ReleasePair stops a pair and deletes its file; ctl.ErrNotFound is 404.
+	// ReleasePair stops a pair and hands its file to the caller;
+	// ctl.ErrNotFound is 404.
 	ReleasePair(ctx context.Context, pairID string) error
 }
 

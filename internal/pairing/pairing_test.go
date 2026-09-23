@@ -11,6 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,12 +201,14 @@ func (f *fakeTerm) Confirm(ctx context.Context, prompt string, def bool) (bool, 
 	return a, nil
 }
 
-// fakeDaemon records control calls.
+// fakeDaemon records control calls. Its onRelease runs as a release hands
+// a pair file over, for a test to leave in it what a running daemon would.
 type fakeDaemon struct {
 	mu          sync.Mutex
 	unreachable bool
 	reloads     int
 	released    []string
+	onRelease   func(id string)
 }
 
 func (f *fakeDaemon) Reload(context.Context) error {
@@ -223,6 +228,9 @@ func (f *fakeDaemon) ReleasePair(_ context.Context, id string) error {
 		return ctl.ErrUnreachable
 	}
 	f.released = append(f.released, id)
+	if f.onRelease != nil {
+		f.onRelease(id)
+	}
 	return nil
 }
 
@@ -518,6 +526,16 @@ func (r *interruptingRelay) Upload(ctx context.Context, pair string, envs []enve
 	return r.Relay.Upload(ctx, pair, envs)
 }
 
+// upload is the phone's next upload. A revoked pair refuses every one, while
+// its stream and ack stay open to the side that did not revoke it for as
+// long as the revoker's records wait there (RELAY.md r9 §6.6).
+func (ph *phone) upload(t *testing.T) error {
+	t.Helper()
+	env := envelope.Envelope{V: 1, Pair: ph.pairID, ID: "01ARYZ6S41TSV4RRFFQ69G5FAV", Dir: envelope.DirP2H, Wake: envelope.WakeNo, TTLSec: 60, CT: base64.RawURLEncoding.EncodeToString(make([]byte, 40))}
+	_, err := ph.client.Upload(t.Context(), ph.pairID, []envelope.Envelope{env})
+	return err
+}
+
 // controls opens the host's records in a pair's mailbox with the phone's key.
 func controls(t *testing.T, w *world, ph *phone) []string {
 	t.Helper()
@@ -613,8 +631,8 @@ func TestAnUnfinishedPairingIsRevoked(t *testing.T) {
 			if pairs, _ := w.dir.ListPairs(); len(pairs) != 0 {
 				t.Errorf("pairs = %+v, want none", pairs)
 			}
-			if err := ph.client.Ack(t.Context(), ph.pairID, "1"); !errors.Is(err, relay.ErrRevoked) {
-				t.Errorf("the phone's next call: err = %v, want ErrRevoked", err)
+			if err := ph.upload(t); !errors.Is(err, relay.ErrRevoked) {
+				t.Errorf("the phone's next upload: err = %v, want ErrRevoked", err)
 			}
 			if got := controls(t, w, ph); strings.Join(got, ", ") != strings.Join(tt.wantControls, ", ") {
 				t.Errorf("records for the phone = %q, want %q", got, tt.wantControls)
@@ -739,6 +757,39 @@ func TestPairReplacesAnExistingPair(t *testing.T) {
 	if err := oldClient.Ack(t.Context(), old.PairID, "1"); !errors.Is(err, relay.ErrRevoked) {
 		t.Errorf("old pair not revoked at the relay: %v", err)
 	}
+	if rec := goodbye(t, w.fake, &old); rec == nil {
+		t.Error("the old phone was not sent a sealed revoke")
+	}
+}
+
+// goodbye is the sealed revoke the relay keeps for a pair's phone, opened
+// with the pair's keys, or nil when there is none.
+func goodbye(t *testing.T, fake *relaytest.Fake, p *state.Pair) *record.Record {
+	t.Helper()
+	rows := fake.Rows(p.PairID, envelope.DirH2P)
+	if len(rows) == 0 {
+		return nil
+	}
+	if len(rows) > 1 {
+		t.Fatalf("the phone's mailbox holds %d rows, want the revoke alone", len(rows))
+	}
+	keys, err := p.Keys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := rows[0]
+	if verr := env.Validate(p.PairID, envelope.DirH2P); verr != nil || env.Wake != envelope.WakeSoon || env.TTLSec != 86400 {
+		t.Fatalf("goodbye envelope = %+v (%v), want a valid h2p one, soon, for a day", env, verr)
+	}
+	plain, err := envelope.Open(keys.Key(envelope.DirH2P), env)
+	if err != nil {
+		t.Fatalf("goodbye does not open with the pair's key: %v", err)
+	}
+	rec, err := record.Unmarshal(plain)
+	if err != nil || rec.Kind != record.KindControl || rec.Control != record.ControlRevoke {
+		t.Fatalf("goodbye = %+v (%v), want a revoke control record", rec, err)
+	}
+	return rec
 }
 
 // A replace that does not complete — the phone declined, the code expired
@@ -907,6 +958,30 @@ func TestPairRejectsAnOddPairingID(t *testing.T) {
 	}
 }
 
+// pairedHost gives the world's config dir a host key and one pair the fake
+// relay knows, as `clair pair` would have left them.
+func (w *world) pairedHost(t *testing.T, mod func(*state.Pair)) (*identity.Keys, state.Pair) {
+	t.Helper()
+	host, _, err := w.dir.EnsureHostKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := &envelope.Keys{}
+	for i := range keys.H2P {
+		keys.H2P[i] = byte(i + 1)
+	}
+	p := state.Pair{PairID: "BBBBBBBBBBBBBBBBBBBBBB", Relay: w.fake.URL, PhoneName: "Pixel", CreatedAt: time.Now(), H2PNext: 2 + envelope.CounterBlock}
+	p.SetKeys(keys)
+	if mod != nil {
+		mod(&p)
+	}
+	if err := w.dir.SavePair(p); err != nil {
+		t.Fatal(err)
+	}
+	w.fake.AddPair(p.PairID, base64.RawURLEncoding.EncodeToString(host.AuthPublic()), "phone")
+	return host, p
+}
+
 func TestUnpair(t *testing.T) {
 	t.Parallel()
 
@@ -914,16 +989,7 @@ func TestUnpair(t *testing.T) {
 	if err := Unpair(t.Context(), w.options()); !errors.Is(err, ErrNothingToUnpair) {
 		t.Fatalf("Unpair on a fresh host: err = %v, want ErrNothingToUnpair", err)
 	}
-	host, _, err := w.dir.EnsureHostKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := state.Pair{PairID: "BBBBBBBBBBBBBBBBBBBBBB", Relay: w.fake.URL, PhoneName: "Pixel", CreatedAt: time.Now()}
-	p.SetKeys(&envelope.Keys{})
-	if err := w.dir.SavePair(p); err != nil {
-		t.Fatal(err)
-	}
-	w.fake.AddPair(p.PairID, base64.RawURLEncoding.EncodeToString(host.AuthPublic()), "phone")
+	host, p := w.pairedHost(t, nil)
 	if err := Unpair(t.Context(), w.options()); err != nil {
 		t.Fatalf("Unpair: %v", err)
 	}
@@ -940,15 +1006,14 @@ func TestUnpair(t *testing.T) {
 	if err := client.Ack(t.Context(), p.PairID, "1"); !errors.Is(err, relay.ErrRevoked) {
 		t.Errorf("pair not revoked at the relay: %v", err)
 	}
+	// The phone is told on the host's own word, above every n the host used.
+	if rec := goodbye(t, w.fake, &p); rec == nil || rec.N != p.H2PNext {
+		t.Errorf("sealed revoke = %+v, want one with n = %d", rec, p.H2PNext)
+	}
 
-	// With the daemon down the file is removed directly.
+	// With the daemon down the file is taken directly.
 	w2 := newWorld(t)
-	if _, _, err := w2.dir.EnsureHostKey(rand.Reader); err != nil {
-		t.Fatal(err)
-	}
-	if err := w2.dir.SavePair(p); err != nil {
-		t.Fatal(err)
-	}
+	_, p2 := w2.pairedHost(t, nil)
 	opts := w2.options()
 	opts.Daemon = &fakeDaemon{unreachable: true}
 	if err := Unpair(t.Context(), opts); err != nil {
@@ -956,6 +1021,87 @@ func TestUnpair(t *testing.T) {
 	}
 	if pairs, _ := w2.dir.ListPairs(); len(pairs) != 0 {
 		t.Error("pair file remains without a daemon")
+	}
+	if goodbye(t, w2.fake, &p2) == nil {
+		t.Error("no sealed revoke without a daemon")
+	}
+}
+
+// The daemon owns a pair's counter while it runs it: the goodbye is sealed
+// from the file only once the daemon has let go and written its last
+// reservation, so its n is one the daemon never used.
+func TestUnpairSealsAboveTheDaemonsLastReservation(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	_, p := w.pairedHost(t, nil)
+	reserved := p.H2PNext + envelope.CounterBlock
+	w.daemon.onRelease = func(id string) {
+		if err := w.dir.ReserveH2P(id, reserved); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := Unpair(t.Context(), w.options()); err != nil {
+		t.Fatalf("Unpair: %v", err)
+	}
+	if rec := goodbye(t, w.fake, &p); rec == nil || rec.N != reserved {
+		t.Errorf("sealed revoke = %+v, want n = %d, the daemon's last limit", rec, reserved)
+	}
+}
+
+// A pair the relay already reports gone is not sent a goodbye it could not
+// take; the DELETE still goes.
+func TestUnpairSendsAParkedPairNoGoodbye(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	_, p := w.pairedHost(t, func(p *state.Pair) { p.RelayRevokedAt = new(time.Now().Add(-time.Hour)) })
+	if err := Unpair(t.Context(), w.options()); err != nil {
+		t.Fatalf("Unpair: %v", err)
+	}
+	if rec := goodbye(t, w.fake, &p); rec != nil {
+		t.Errorf("a parked pair was sent %+v, want nothing", rec)
+	}
+	var deleted bool
+	for _, r := range w.fake.Requests() {
+		deleted = deleted || (r.Method == http.MethodDelete && r.RequestURI == "/v1/pairs/"+p.PairID && r.Status == http.StatusNoContent)
+	}
+	if !deleted {
+		t.Error("the parked pair was not deleted at the relay")
+	}
+}
+
+// An unreachable relay delays unpairing by the goodbye's bound, never more,
+// and never keeps it from happening.
+func TestUnpairIsNotHeldUpByAnUnreachableRelay(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	// Reading the body lets the server notice the client leave, so the
+	// handler ends with the request instead of holding up Close.
+	hang := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(hang.Close)
+	w.pairedHost(t, func(p *state.Pair) { p.Relay = hang.URL })
+	opts := w.options()
+	opts.GoodbyeTimeout = 50 * time.Millisecond
+	start := time.Now()
+	if err := Unpair(t.Context(), opts); err != nil {
+		t.Fatalf("Unpair: %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("Unpair took %v against a relay that never answers, want about twice the 50ms bound", d)
+	}
+	if _, err := w.dir.LoadHostKey(); !errors.Is(err, state.ErrNotFound) {
+		t.Error("host key remains")
+	}
+	if pairs, _ := w.dir.ListPairs(); len(pairs) != 0 || w.uninstall != 1 {
+		t.Errorf("after Unpair: %d pairs, %d uninstalls; want none and one", len(pairs), w.uninstall)
+	}
+	if !strings.Contains(w.stderr.String(), "did not revoke") {
+		t.Errorf("stderr = %q, want it to say the relay was not told", w.stderr.String())
 	}
 }
 

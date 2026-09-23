@@ -8,7 +8,7 @@ topics: [daemon, state, cli]
 
 # ADR 2026-09.r7kd — The control surface shares the loopback listener under /clair/ctl with its own token, and a pair file has one writer
 
-Status: Accepted (2026-09-21)
+Status: Accepted (2026-09-21); a release hands the pair file over instead of deleting it since ADR 2026-09.69ym
 
 **What was observed.** `clair pair` and `clair unpair` run as separate processes from the
 daemon (interview decision 3: pairing needs no running daemon), yet the daemon must learn about

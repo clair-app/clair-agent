@@ -181,6 +181,8 @@ func cmdUnpair(ctx context.Context, d deps, args []string, stdout, stderr io.Wri
 		Uninstall: installer.Uninstall,
 		Stdout:    stdout,
 		Stderr:    stderr,
+		Now:       d.now,
+		Entropy:   d.entropy,
 	}
 	if err := pairing.Unpair(ctx, opts); err != nil {
 		fmt.Fprintf(stderr, "clair unpair: %v\n", err)

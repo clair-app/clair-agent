@@ -99,6 +99,9 @@ type Options struct {
 	Entropy      io.Reader
 	Hostname     string
 	AgentVersion string
+	// GoodbyeTimeout bounds each relay call that tells the relay a released
+	// pair ended; zero is goodbyeTimeout. Tests shorten it.
+	GoodbyeTimeout time.Duration
 }
 
 // Pair runs `clair pair`.
@@ -312,7 +315,7 @@ func (o Options) abandon(ctx context.Context, p *unfinishedPair) {
 			fmt.Fprintf(o.Stderr, "clair pair: the phone was not sent the revoke (%v); it will see the pair gone.\n", err)
 		}
 	}
-	if err := p.client.Revoke(ctx, p.pairID); err != nil && !errors.Is(err, relay.ErrRevoked) && !errors.Is(err, relay.ErrNotFound) {
+	if err := p.client.Revoke(ctx, p.pairID); err != nil && !gone(err) {
 		fmt.Fprintf(o.Stderr, "clair pair: the relay did not drop the unfinished pair %s: %v\n", p.pairID, err)
 	}
 }
@@ -349,40 +352,53 @@ func (o Options) confirmReplace(ctx context.Context, existing []state.Pair) erro
 	return nil
 }
 
-// releaseAll stops and revokes the existing pairs: the daemon hands the
-// files over (or they are removed directly when it is not running), the
-// relay is told, and the old host key goes with them.
+// releaseAll stops and revokes the existing pairs: the daemon hands each file
+// over (or none is running), the CLI takes it and seals the pair's `revoke`
+// from its counter, the relay gets that and then the DELETE, and the old
+// host key goes with them. Only taking the files can fail it; the relay is
+// told best effort and briefly (ADR 2026-09.69ym).
 func (o Options) releaseAll(ctx context.Context, existing []state.Pair) error {
 	oldHost, err := o.Dir.LoadHostKey()
 	if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return err
 	}
+	farewells := make([]farewell, 0, len(existing))
 	for i := range existing {
-		p := &existing[i]
-		if err := o.releasePair(ctx, p.PairID); err != nil {
+		taken, ok, err := o.releasePair(ctx, existing[i].PairID)
+		if err != nil {
 			return err
 		}
-		if oldHost != nil {
-			if client, err := o.NewRelay(p.Relay, oldHost.Auth()); err == nil {
-				if err := client.Revoke(ctx, p.PairID); err != nil && !errors.Is(err, relay.ErrRevoked) && !errors.Is(err, relay.ErrNotFound) {
-					fmt.Fprintf(o.Stderr, "clair pair: the relay did not revoke %s: %v\n", p.PairID, err)
-				}
-			}
+		var file *state.Pair
+		if ok {
+			file = &taken
 		}
+		farewells = append(farewells, o.farewellFor(&existing[i], file))
+	}
+	if oldHost != nil {
+		o.sayGoodbye(ctx, oldHost, farewells)
 	}
 	return nil
 }
 
 // releasePair takes a pair file back from the daemon — which stops the pair
-// and deletes the file — and deletes it regardless, which is what happens
-// when no daemon is running or it never held the pair.
-func (o Options) releasePair(ctx context.Context, pairID string) error {
+// and hands the file over — or straight from disk when no daemon is running
+// or it never held the pair, and deletes it. It returns the file as taken,
+// and false when none was left to take (a daemon from before the handover
+// deleted it itself).
+func (o Options) releasePair(ctx context.Context, pairID string) (state.Pair, bool, error) {
 	if o.Daemon != nil {
 		if err := o.Daemon.ReleasePair(ctx, pairID); err != nil && !errors.Is(err, ctl.ErrUnreachable) && !errors.Is(err, ctl.ErrNotFound) {
-			return err
+			return state.Pair{}, false, err
 		}
 	}
-	return o.Dir.DeletePair(pairID)
+	taken, err := o.Dir.TakePair(pairID)
+	switch {
+	case errors.Is(err, state.ErrNotFound):
+		return state.Pair{}, false, nil
+	case err != nil:
+		return state.Pair{}, false, err
+	}
+	return taken, true, nil
 }
 
 // hostKey returns the host's keys: new, not yet saved ones for a replace
@@ -472,11 +488,14 @@ func (o Options) reloadDaemon(ctx context.Context) {
 	}
 }
 
-// Unpair runs `clair unpair`: the pairs are released and revoked, the hooks
-// removed, the host key deleted (§6.6).
+// Unpair runs `clair unpair`: the pairs are released, told and revoked, the
+// hooks removed, the host key deleted (§6.6).
 func Unpair(ctx context.Context, o Options) error {
-	if o.Dir == nil || o.NewRelay == nil || o.Uninstall == nil {
-		return errors.New("pairing: Dir, NewRelay and Uninstall are required")
+	if o.Dir == nil || o.NewRelay == nil || o.Entropy == nil || o.Uninstall == nil {
+		return errors.New("pairing: Dir, NewRelay, Entropy and Uninstall are required")
+	}
+	if o.Now == nil {
+		o.Now = time.Now
 	}
 	if o.Stdout == nil {
 		o.Stdout = io.Discard

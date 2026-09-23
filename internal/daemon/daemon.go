@@ -298,8 +298,11 @@ func (d *daemon) setLoaded(configs []tunnel.PairConfig) {
 	d.tunnel.SetPairs(configs)
 }
 
-// ReleasePair stops a pair and deletes its file so the CLI may write a new
-// one (the pair-file ownership handoff).
+// ReleasePair stops a pair — its held decides answered, its stream released
+// at the relay, its last counters written — and hands its file to the CLI
+// (the pair-file ownership handoff, ADR 2026-09.r7kd). The CLI takes the
+// file to seal the pair's goodbye from its counter, or deletes it, so the
+// daemon leaves it where it is (ADR 2026-09.69ym).
 func (d *daemon) ReleasePair(_ context.Context, pairID string) error {
 	d.mu.Lock()
 	_, ok := d.loaded[pairID]
@@ -320,9 +323,6 @@ func (d *daemon) ReleasePair(_ context.Context, pairID string) error {
 		}
 	}
 	d.tunnel.SetPairs(remaining)
-	if err := d.opts.Dir.DeletePair(pairID); err != nil {
-		return err
-	}
 	d.log.Info("pair released", "pair", pairID)
 	return nil
 }
