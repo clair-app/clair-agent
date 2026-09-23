@@ -35,9 +35,12 @@ phone parks the same way since RELAY.md r9).
   `h2pNext`. The counter persists a block's limit before it hands out any value in the block, so
   every `n` ever used is below that limit. With the file gone, no counter can reserve from it
   again.
-- All pairs say goodbye at once. The relay gets the sealed `revoke` first. Only once it has taken
-  it, the CLI sends the `DELETE`: after a `DELETE` the relay refuses every upload, and it keeps
-  the revoker's sent rows for the other side (RELAY.md r9 §6.6).
+- All pairs say goodbye at once. The relay gets the sealed `revoke` first and the `DELETE` after
+  it, never before: after a `DELETE` the relay refuses every upload, and it keeps the revoker's
+  sent rows for the other side (RELAY.md r9 §6.6). An upload that fails does not hold the
+  `DELETE` back, unlike the phone's retried goodbye. The host forgets the pair either way and
+  keeps nothing to retry with, and a phone the relay alone tells parks the pair for a week rather
+  than keep a live pair nobody reads.
 - Each call is bounded by `goodbyeTimeout` (3 s), so an unreachable relay delays unpairing by
   about 6 s at most. It never stops the unpairing, which is local. Failures are reported on
   stderr.
@@ -74,7 +77,7 @@ through the control channel, with the counter it holds. It was not taken:
 What keeps this true:
 
 - `internal/pairing`: `TestUnpair`, `TestUnpairSealsAboveTheDaemonsLastReservation`,
-  `TestUnpairSendsAParkedPairNoGoodbye`, `TestUnpairIsNotHeldUpByAnUnreachableRelay`,
-  `TestPairReplacesAnExistingPair`
+  `TestUnpairSendsAParkedPairNoGoodbye`, `TestUnpairDeletesWhenTheGoodbyeIsRefused`,
+  `TestUnpairIsNotHeldUpByAnUnreachableRelay`, `TestPairReplacesAnExistingPair`
 - `internal/tunnel`: `TestPhoneRevokeReleasesHoldsAndNotifiesOnce` (the ack, then the `DELETE`)
 - `internal/daemon`: `TestReleasePairHandsTheFileOver`, `TestEndToEnd`

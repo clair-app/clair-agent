@@ -1071,6 +1071,29 @@ func TestUnpairSendsAParkedPairNoGoodbye(t *testing.T) {
 	}
 }
 
+// A goodbye the relay will not take does not hold the DELETE back: the host
+// forgets the pair either way, and the phone learns of it from the relay.
+func TestUnpairDeletesWhenTheGoodbyeIsRefused(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	host, p := w.pairedHost(t, nil)
+	w.fake.Set(func(f *relaytest.Fake) { f.MailboxFull = true })
+	if err := Unpair(t.Context(), w.options()); err != nil {
+		t.Fatalf("Unpair: %v", err)
+	}
+	if rec := goodbye(t, w.fake, &p); rec != nil {
+		t.Errorf("the relay holds %+v, want the refused goodbye absent", rec)
+	}
+	client, _ := relay.New(host.Auth(), relay.Options{BaseURL: w.fake.URL})
+	if err := client.Ack(t.Context(), p.PairID, "1"); !errors.Is(err, relay.ErrRevoked) {
+		t.Errorf("pair not revoked at the relay: %v", err)
+	}
+	if !strings.Contains(w.stderr.String(), "was not told directly") {
+		t.Errorf("stderr = %q, want it to say the phone was not told", w.stderr.String())
+	}
+}
+
 // An unreachable relay delays unpairing by the goodbye's bound, never more,
 // and never keeps it from happening.
 func TestUnpairIsNotHeldUpByAnUnreachableRelay(t *testing.T) {

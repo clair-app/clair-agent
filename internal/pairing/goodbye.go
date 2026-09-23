@@ -58,10 +58,12 @@ func (o Options) sealRevoke(p *state.Pair) (envelope.Envelope, error) {
 }
 
 // sayGoodbye tells the relay, for every released pair at once: the sealed
-// `revoke` first, so the phone ends the pair on the host's own word, and
-// only once the relay took it the DELETE, which would refuse the upload
-// after it (ADR 2026-09.69ym). Best effort: what fails is said on stderr and
-// never stops the unpairing, which is local.
+// `revoke` first, so the phone ends the pair on the host's own word, then
+// the DELETE, never before it, since the relay refuses every upload to a
+// revoked pair. A failed upload does not hold the DELETE back: the host
+// forgets the pair either way, and a phone told only by the relay parks it
+// for a week (ADR 2026-09.69ym). Best effort: what fails is said on stderr
+// and never stops the unpairing, which is local.
 func (o Options) sayGoodbye(ctx context.Context, host *identity.Keys, farewells []farewell) {
 	var wg sync.WaitGroup
 	for i := range farewells {
