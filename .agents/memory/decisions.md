@@ -15,11 +15,13 @@ number" and all take it — so nobody picks one. Cite the id an ADR carries; nev
 
 | ADR | Decision | Topics |
 | --- | --- | --- |
+| [2026-09.32b5](decisions/2026-09-32b5-a-parked-pair-resumes-only-when-the-relay-accepts-its-reset.md) | A parked pair resumes only when the relay accepts its reset, and only the relay's own 404 parks it | relay, state, security |
 | [2026-09.34qh](decisions/2026-09-34qh-the-agent-reads-terminal-input-idle-time-itself-and-releases-a-bubbled-decide.md) | The agent reads terminal input idle time itself and releases a bubbled decide to the terminal while someone is at it | presence, hooks, tunnel |
 | [2026-09.3gre](decisions/2026-09-3gre-a-phone-snippet-may-only-shape-the-agent-s-own-http-hooks.md) | A phone snippet may only shape the agent's own http hooks | hooks, security |
 | [2026-09.9ufb](decisions/2026-09-9ufb-a-relay-reported-revoke-parks-a-pair.md) | A relay-reported revoke parks a pair; only the phone's sealed revoke or a week of unbroken reports deletes it | relay, state, security |
 | [2026-09.bckr](decisions/2026-09-bckr-a-phone-snippet-is-filled-in-as-json.md) | A phone snippet is filled in as JSON, matched on the agent's port, trimmed to known events, and replaced by the built-in block at pairing | hooks, security, pairing |
 | [2026-09.evep](decisions/2026-09-evep-the-agent-edits-settings-json-through-an-order-preserving-json-object-and.md) | The agent edits settings.json through an order-preserving JSON object and installs clair statusline in place of the shell shim | hooks, claudecfg |
+| [2026-09.hu4b](decisions/2026-09-hu4b-the-agent-releases-its-stream-when-it-stops-or-lets-a-pair-go.md) | The agent releases its stream when it stops or lets a pair go | relay, daemon, transport |
 | [2026-09.hzwt](decisions/2026-09-hzwt-the-replay-counter-survives-restarts-by-block-reservation.md) | The replay counter survives restarts by block reservation; the mailbox cursor is not persisted | protocol, state |
 | [2026-09.kau2](decisions/2026-09-kau2-static-analysis-is-one-pinned-golangci-lint-with-an-explicit-linter-set-and-a.md) | Static analysis is one pinned golangci-lint with an explicit linter set and a dependency allow-list | toolchain, lint, dependencies |
 | [2026-09.khcq](decisions/2026-09-khcq-the-agent-speaks-sse-down-and-post-up-only.md) | The agent speaks SSE down and POST up only; streams are bounded and resumed by cursor | relay, transport, protocol |

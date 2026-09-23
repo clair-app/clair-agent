@@ -50,6 +50,11 @@ const (
 	dormantRecheckMin = time.Minute
 	dormantRecheckMax = 15 * time.Minute
 	dormantGrace      = 7 * 24 * time.Hour
+	// A call that only tidies the relay — releasing a stream the agent
+	// closed, deleting a pair the phone revoked — gets relayTidyTimeout,
+	// once: stopping never waits on the relay for longer (ADR 2026-09.hu4b,
+	// draft).
+	relayTidyTimeout = 2 * time.Second
 	// Acks are coalesced: the highest applied cursor is sent at most every
 	// ackInterval (§7.4, draft).
 	ackInterval = time.Second
@@ -83,6 +88,8 @@ type Relay interface {
 	Upload(ctx context.Context, pair string, envs []envelope.Envelope) (relay.Receipt, error)
 	Ack(ctx context.Context, pair string, cursor relay.Cursor) error
 	Stream(ctx context.Context, pair string, last relay.Cursor, h relay.Handler) error
+	ReleaseStream(ctx context.Context, pair string) error
+	Revoke(ctx context.Context, pair string) error
 	Skew() time.Duration
 }
 
@@ -227,8 +234,10 @@ func (t *Tunnel) Run(ctx context.Context) error {
 }
 
 // SetPairs makes the running set match pairs: new ids start, missing ids
-// stop (their holds are released), known ids are left alone. Before Run it
-// records them for Run to start.
+// stop (their holds are released, their streams released at the relay),
+// known ids are left alone. It returns once the stopped pairs' goroutines
+// have, so their files are the caller's. Before Run it records them for Run
+// to start.
 func (t *Tunnel) SetPairs(pairs []PairConfig) {
 	want := make(map[string]*PairConfig, len(pairs))
 	for i := range pairs {
@@ -470,8 +479,9 @@ func (t *Tunnel) Drain(ctx context.Context) {
 	ticker := time.NewTicker(drainPoll)
 	defer ticker.Stop()
 	for {
+		// A parked pair's queue holds at most its probe, not worth the wait.
 		empty := true
-		for _, p := range t.livePairs() {
+		for _, p := range t.activePairs() {
 			if p.depth() > 0 {
 				empty = false
 			}

@@ -8,7 +8,7 @@ topics: [relay, state, security]
 
 # ADR 2026-09.9ufb — A relay-reported revoke parks a pair; only the phone's sealed revoke or a week of unbroken reports deletes it
 
-Status: Accepted (2026-09-23)
+Status: Accepted (2026-09-23); which 404 parks a pair, and what resumes one, amended by ADR 2026-09.32b5
 
 **What was observed.** RELAY.md §6.6 has a host that sees `event: revoked`, a `410`, or
 (in the code) any `404` delete its pair file and, once no pair remains, uninstall its hooks and
