@@ -14,7 +14,8 @@ an explanation, that explanation belongs in the ADR.
 | --- | --- |
 | `go.mod`, `.golangci.yml`'s `depguard` allow-list or linter list, the tool pins in the `Makefile`, or reaching for a library the standard library could replace | [ADR 2026-09.kau2](../memory/decisions/2026-09-kau2-static-analysis-is-one-pinned-golangci-lint-with-an-explicit-linter-set-and-a.md) |
 | a `_test.go` that wants `testify`, `gomega` or `go-cmp`, or a golden vector that "needs a small fix" | [ADR 2026-09.vnj9](../memory/decisions/2026-09-vnj9-tests-are-the-standard-library-and-golden-vectors.md) |
-| `internal/relay` — a transport, the auth header, stream reconnection, or the idea of a WebSocket | [ADR 2026-09.khcq](../memory/decisions/2026-09-khcq-the-agent-speaks-sse-down-and-post-up-only.md) |
+| `internal/relay` — a transport, stream reconnection, or the idea of a WebSocket | [ADR 2026-09.khcq](../memory/decisions/2026-09-khcq-the-agent-speaks-sse-down-and-post-up-only.md) |
+| the `Authorization` header, the canonical string, a nonce, a 401 `reason`, or a retry around a signed request | [ADR 2026-09.n68c](../memory/decisions/2026-09-n68c-the-agent-signs-every-relay-request-with-canonical-v2-and-a-fresh-nonce.md) |
 | the QR payload, its rendering, or `rsc.io/qr` | [ADR 2026-09.zhzc](../memory/decisions/2026-09-zhzc-the-qr-is-rendered-with-rsc-io-qr-and-drawn-in-half-blocks-by-the-agent.md) |
 | `n`, `h2pNext`, `p2hLast`, the mailbox cursor, or a pair file's counters | [ADR 2026-09.hzwt](../memory/decisions/2026-09-hzwt-the-replay-counter-survives-restarts-by-block-reservation.md) |
 | `/clair/ctl`, the admin token, the hookserver guard order, or who writes a pair file | [ADR 2026-09.r7kd](../memory/decisions/2026-09-r7kd-the-control-surface-shares-the-loopback-listener-under-clair-ctl-with-its-own.md) |

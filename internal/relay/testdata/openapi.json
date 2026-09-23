@@ -47,7 +47,7 @@
         ],
         "operationId": "mintPairing",
         "summary": "Mint a pending pairing (host)",
-        "description": "The pairing expires after 10 min and can be completed once. The caller becomes a host. Limits: ≤ 3 pending and ≤ 10/h per host key, ≤ 30/h per IP.",
+        "description": "The pairing expires after 10 min and can be completed once. Minting registers the caller as a host. Limits: ≤ 3 pending and ≤ 10/h per host key, ≤ 30/h per IP.",
         "responses": {
           "201": {
             "description": "Minted.",
@@ -60,7 +60,7 @@
             }
           },
           "401": {
-            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -98,7 +98,7 @@
         ],
         "operationId": "completePairing",
         "summary": "Complete a pairing (phone)",
-        "description": "Stores the phone's X25519 key and its hello envelope (`dir: p2h`, `pair` = this pairing's id) for the host's `/wait`. The caller becomes a phone.",
+        "description": "Stores the phone's X25519 key and its hello envelope (`dir: p2h`, `pair` = this pairing's id) for the host's `/wait`. Completing registers the caller as a phone; a `pushToken` given here moves off any other device that held it. The minting host cannot complete its own pairing.",
         "parameters": [
           {
             "name": "id",
@@ -132,7 +132,7 @@
             }
           },
           "400": {
-            "description": "The body or its envelope did not validate. — `error`: `invalid_body`, `invalid_envelope`, `pair_mismatch`, `dir_mismatch`",
+            "description": "The body or its envelope did not validate, or the host is completing its own pairing. — `error`: `invalid_body`, `invalid_envelope`, `pair_mismatch`, `dir_mismatch`, `self_pairing`",
             "content": {
               "application/json": {
                 "schema": {
@@ -142,7 +142,7 @@
             }
           },
           "401": {
-            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -254,7 +254,7 @@
             }
           },
           "401": {
-            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -310,7 +310,7 @@
             "description": "Revoked."
           },
           "401": {
-            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -400,7 +400,7 @@
             }
           },
           "401": {
-            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -515,7 +515,7 @@
             }
           },
           "401": {
-            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -608,7 +608,7 @@
             }
           },
           "401": {
-            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -647,7 +647,7 @@
         ],
         "operationId": "putPushToken",
         "summary": "Store the phone's FCM token (phone)",
-        "description": "Stored against the calling device, not a pair; the caller becomes a phone. Wake pushes arrive with phase 3.",
+        "description": "Stored against the calling phone, not a pair, and moved off any other device that held it. Only a phone that has completed a pairing has one. The relay wakes the phone through it while its stream is closed, and forgets a token FCM reports dead — `GET /v1/devices/me/push` says when it has.",
         "requestBody": {
           "required": true,
           "content": {
@@ -673,7 +673,7 @@
             }
           },
           "401": {
-            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, or a bad signature. Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`; correct the clock from `serverTime`. — `error`: `unauthorized`",
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -682,8 +682,80 @@
               }
             }
           },
+          "403": {
+            "description": "The caller is a host. — `error`: `not_a_phone`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The caller never completed a pairing. — `error`: `device_not_found`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "415": {
             "description": "A body that is not `application/json` cannot be verified against the signature. — `error`: `unsupported_media_type`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/devices/me/push": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "getPushStatus",
+        "summary": "The phone's wake path: token, budget, latency (phone)",
+        "description": "Whether the relay holds a push token for the caller (it clears one FCM reports dead: send a fresh one), what is left of the daily push budget — ≤ 500 pushes per 24 h window across all pairs, of which ≤ 50 high priority; past that a `now` goes out at normal priority — and per pair the last push → connect latency, the signal that Android is downgrading the app (RELAY.md §9).",
+        "responses": {
+          "200": {
+            "description": "The status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or malformed `Authorization`, clock skew beyond ±5 min, a bad signature, or a nonce already spent (`replay`). Carries `WWW-Authenticate: Clair-Ed25519 realm=\"clair-relay\"`. On `skew`, correct the clock from `serverTime` and retry once; on `replay`, re-sign with a fresh nonce and retry once. — `error`: `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Unauthorized"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is a host. — `error`: `not_a_phone`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The caller never completed a pairing. — `error`: `device_not_found`",
             "content": {
               "application/json": {
                 "schema": {
@@ -891,7 +963,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "Authorization",
-        "description": "Every device request is signed with its Ed25519 key; there are no tokens and no sign-up. A device is registered by its first valid request.\n\n```text\nAuthorization: Clair-Ed25519 key=<b64url authPub>, ts=<unix seconds>, sig=<b64url signature>\nsig = Ed25519( METHOD \\n path-with-query \\n ts \\n sha256hex(body) )\n```\n\n`METHOD` upper-case; the path is the request target exactly as sent, query included; `sha256hex` is lowercase hex over the raw body bytes (an empty body hashes the empty string). `key` and `sig` are base64url without padding. `ts` must be within ±5 min of the relay's clock. The SSE `GET`s are signed the same way."
+        "description": "Every device request is signed with its Ed25519 key; there are no tokens and no sign-up. A device is registered by minting (host) or completing (phone) a pairing.\n\n```text\nAuthorization: Clair-Ed25519 key=<b64url authPub>, ts=<unix seconds>, nonce=<b64url>, sig=<b64url signature>\nv2  sig = Ed25519( \"clair-v2\" \\n METHOD \\n host \\n path-with-query \\n ts \\n nonce \\n sha256hex(body) )\nv1  sig = Ed25519( METHOD \\n path-with-query \\n ts \\n sha256hex(body) )   (no nonce= parameter)\n```\n\n`METHOD` upper-case; `host` is the `Host` header sent, lower-case, with its port if one was sent; the path is the request target exactly as sent, query included; `sha256hex` is lowercase hex over the raw body bytes (an empty body hashes the empty string). `key`, `nonce` (16–32 random bytes) and `sig` are base64url without padding. `ts` must be within ±5 min of the relay's clock. A nonce is accepted once per key — a second use is `401 replay` — so send a fresh one on every request, retries included. v1 is accepted until the relay sets `AUTH_NONCE=required`. The SSE `GET`s are signed the same way."
       },
       "CronBearer": {
         "type": "http",
@@ -1032,8 +1104,7 @@
         "properties": {
           "token": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 4096
+            "pattern": "^[A-Za-z0-9_:.-]{1,1024}$"
           }
         },
         "required": [
@@ -1050,8 +1121,7 @@
           },
           "pushToken": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 4096
+            "pattern": "^[A-Za-z0-9_:.-]{1,1024}$"
           },
           "envelope": {
             "$ref": "#/components/schemas/Envelope"
@@ -1194,6 +1264,10 @@
             ],
             "description": "The deployed commit, on Vercel."
           },
+          "push": {
+            "type": "boolean",
+            "description": "Whether this relay can wake an idle phone through FCM. A phone must not go idle on a relay that says `false`."
+          },
           "now": {
             "type": "string",
             "format": "date-time"
@@ -1203,6 +1277,7 @@
           "ok",
           "service",
           "commit",
+          "push",
           "now"
         ]
       },
@@ -1222,6 +1297,12 @@
             "type": "integer"
           },
           "devicesSwept": {
+            "type": "integer"
+          },
+          "noncesSwept": {
+            "type": "integer"
+          },
+          "wakesSent": {
             "type": "integer"
           }
         }
@@ -1257,6 +1338,105 @@
           "error"
         ]
       },
+      "PushStatus": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether this relay can push at all (as `/healthz` `push`)."
+          },
+          "token": {
+            "type": "boolean",
+            "description": "Whether the relay holds a push token for this phone. `false` after FCM reported it dead: send a fresh one."
+          },
+          "budget": {
+            "type": "object",
+            "properties": {
+              "windowEndsAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time",
+                "description": "When the current window closes; `null` when none is open."
+              },
+              "high": {
+                "$ref": "#/components/schemas/BudgetUse"
+              },
+              "total": {
+                "$ref": "#/components/schemas/BudgetUse"
+              }
+            },
+            "required": [
+              "windowEndsAt",
+              "high",
+              "total"
+            ]
+          },
+          "pairs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "pairId": {
+                  "$ref": "#/components/schemas/Id"
+                },
+                "lastConnectLatencyMs": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "description": "Push → stream open, for the last answered high-priority push."
+                },
+                "lastPushAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "retryAfter": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "description": "Set while a failed push is backing off."
+                }
+              },
+              "required": [
+                "pairId",
+                "lastConnectLatencyMs",
+                "lastPushAt",
+                "retryAfter"
+              ]
+            }
+          }
+        },
+        "required": [
+          "enabled",
+          "token",
+          "budget",
+          "pairs"
+        ]
+      },
+      "BudgetUse": {
+        "type": "object",
+        "properties": {
+          "used": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "used",
+          "limit"
+        ]
+      },
       "Unauthorized": {
         "type": "object",
         "properties": {
@@ -1267,7 +1447,8 @@
             "enum": [
               "malformed",
               "skew",
-              "signature"
+              "signature",
+              "replay"
             ]
           },
           "serverTime": {

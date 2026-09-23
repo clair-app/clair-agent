@@ -584,7 +584,7 @@ func TestRootCAsPinTheRelay(t *testing.T) {
 func TestNewRejectsBadBaseURLs(t *testing.T) {
 	t.Parallel()
 
-	for _, raw := range []string{"relay.claircode.app", "ftp://relay", "https://", "://x"} {
+	for _, raw := range []string{"relay.claircode.app", "ftp://relay", "https://", "://x", "https://rélay.example"} {
 		if _, err := relay.New(newIdentity(t).Auth(), relay.Options{BaseURL: raw}); err == nil {
 			t.Errorf("New(%q): want an error", raw)
 		}

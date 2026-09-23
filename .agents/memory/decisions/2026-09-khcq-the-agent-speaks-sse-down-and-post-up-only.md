@@ -8,7 +8,7 @@ topics: [relay, transport, protocol]
 
 # ADR 2026-09.khcq — The agent speaks SSE down and POST up only; streams are bounded and resumed by cursor
 
-Status: Accepted (2026-09-21)
+Status: Accepted (2026-09-21); the canonical string is superseded by ADR 2026-09.n68c (v2, a nonce and the host)
 
 **What was observed.** `docs/RELAY.md` (rev 2026-09-21) gives the host a WebSocket as its primary
 transport with SSE + `POST` as the fallback after a failed upgrade (§7.2, §12). The relay is

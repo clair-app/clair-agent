@@ -3,12 +3,16 @@ package relay_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"mime"
 	"net/http"
 	"net/http/httptest"
@@ -30,7 +34,7 @@ import (
 )
 
 // specPath is the relay's OpenAPI 3.1 document, copied unchanged from
-// clair-server commit 21bbdf4 (`openapi.json` at its root; the relay serves it
+// clair-server commit d74f7a7 (`openapi.json` at its root; the relay serves it
 // at /openapi.json). A refresh replaces the file and this commit together. A
 // check that then fails is drift between the relay and this client or the
 // fake, never a reason to edit the copy.
@@ -142,6 +146,44 @@ func TestContract(t *testing.T) {
 		}
 	}
 
+	// Signed-request refusals (relay ADR 2026-09.9vsq, as with
+	// AUTH_NONCE=required): a nonce is good once, the host is signed, and a
+	// header without a nonce is malformed. Then a host completing its own pairing.
+	ack := "/v1/pairs/" + pair + "/ack"
+	ackBody := []byte(`{"cursor":0}`)
+	once := raw.sign(hostKeys, http.MethodPost, mustURL(t, srv.URL).Host, ack, ackBody)
+	if status, code := raw.withHeader(http.MethodPost, ack, ackBody, once); status != http.StatusNoContent {
+		t.Errorf("a freshly signed ack: %d %s, want 204", status, code)
+	}
+	ts := time.Now().Unix()
+	sum := sha256.Sum256(ackBody)
+	v1 := fmt.Sprintf("POST\n%s\n%d\n%x", ack, ts, sum)
+	for _, c := range []struct {
+		name, header string
+		reason       string
+	}{
+		{"the same header again", once, "replay"},
+		{"a request signed for another host", raw.sign(hostKeys, http.MethodPost, "relay.claircode.app", ack, ackBody), "signature"},
+		{"a v1 header without a nonce", "Clair-Ed25519 key=" + relay.NewSigner(hostKeys.Auth()).Key() + ", ts=" + strconv.FormatInt(ts, 10) +
+			", sig=" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(hostKeys.Auth(), []byte(v1))), "malformed"},
+	} {
+		status, code := raw.withHeader(http.MethodPost, ack, ackBody, c.header)
+		if status != http.StatusUnauthorized || code != "unauthorized" {
+			t.Errorf("%s: %d %s, want 401 unauthorized", c.name, status, code)
+		}
+		if got := lastReason(t, rec); got != c.reason {
+			t.Errorf("%s: reason %q, want %q", c.name, got, c.reason)
+		}
+	}
+	own, err := host.MintPairing(ctx)
+	if err != nil {
+		t.Fatalf("MintPairing: %v", err)
+	}
+	selfHello := mustJSON(t, map[string]any{"phonePub": base64.RawURLEncoding.EncodeToString(hostKeys.AgreementPublic()), "envelope": mkEnv(t, own.ID, envelope.DirP2H, 30, 8)})
+	if status, code := raw.do(hostKeys, http.MethodPost, "/v1/pairings/"+own.ID+"/complete", "", selfHello, ""); status != 400 || code != "self_pairing" {
+		t.Errorf("a host completing its own pairing: %d %s, want 400 self_pairing", status, code)
+	}
+
 	// The phone drains its stream, acking what it applied; the host revokes.
 	var seen int
 	err = phone.Stream(ctx, pair, "", func(ctx context.Context, ev relay.Event) error {
@@ -235,6 +277,31 @@ type rawCaller struct {
 // do sends one signed request and returns the status and the body's `error`.
 func (r rawCaller) do(keys *identity.Keys, method, path, contentType string, body []byte, lastID string) (status int, code string) {
 	r.t.Helper()
+	req := r.build(method, path, contentType, body, lastID)
+	req.Header.Set("Authorization", r.sign(keys, method, req.Host, path, body))
+	return r.send(req)
+}
+
+// withHeader sends one JSON request carrying exactly authorization.
+func (r rawCaller) withHeader(method, path string, body []byte, authorization string) (status int, code string) {
+	r.t.Helper()
+	req := r.build(method, path, "", body, "")
+	req.Header.Set("Authorization", authorization)
+	return r.send(req)
+}
+
+// sign is the v2 header for one request, with a fresh nonce.
+func (r rawCaller) sign(keys *identity.Keys, method, host, path string, body []byte) string {
+	r.t.Helper()
+	nonce, err := relay.NewNonce(rand.Reader)
+	if err != nil {
+		r.t.Fatalf("nonce: %v", err)
+	}
+	return relay.NewSigner(keys.Auth()).Authorization(method, host, path, time.Now().Unix(), nonce, body)
+}
+
+func (r rawCaller) build(method, path, contentType string, body []byte, lastID string) *http.Request {
+	r.t.Helper()
 	req, err := http.NewRequestWithContext(r.t.Context(), method, r.base+path, bytes.NewReader(body))
 	if err != nil {
 		r.t.Fatalf("build %s %s: %v", method, path, err)
@@ -248,7 +315,12 @@ func (r rawCaller) do(keys *identity.Keys, method, path, contentType string, bod
 	if lastID != "" {
 		req.Header.Set("Last-Event-ID", lastID)
 	}
-	req.Header.Set("Authorization", relay.NewSigner(keys.Auth()).Authorization(method, path, time.Now().Unix(), body))
+	return req
+}
+
+func (r rawCaller) send(req *http.Request) (status int, code string) {
+	r.t.Helper()
+	method, path := req.Method, req.URL.Path
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		r.t.Fatalf("%s %s: %v", method, path, err)
@@ -268,6 +340,19 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatalf("encode %T: %v", v, err)
 	}
 	return data
+}
+
+// lastReason is the `reason` of the last exchange rec saw.
+func lastReason(t *testing.T, rec *recorder) string {
+	t.Helper()
+	log := rec.exchanges()
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if len(log) > 0 {
+		_ = json.Unmarshal(log[len(log)-1].body, &body)
+	}
+	return body.Reason
 }
 
 // exchange is one request the relay answered, as sent and as answered.
@@ -664,11 +749,11 @@ func hasType(v any, name string) bool {
 
 func validateString(s schema, v, at string) error {
 	if p, ok := s["pattern"].(string); ok {
-		re, err := regexp.Compile(p)
+		re, minLen, maxLen, err := compilePattern(p)
 		if err != nil {
 			return fmt.Errorf("%s: pattern %q: %w", at, p, err)
 		}
-		if !re.MatchString(v) {
+		if n := utf8.RuneCountInString(v); !re.MatchString(v) || n < minLen || n > maxLen {
 			return fmt.Errorf("%s: %.40q does not match %s", at, v, p)
 		}
 	}
@@ -684,6 +769,29 @@ func validateString(s schema, v, at string) error {
 		}
 	}
 	return nil
+}
+
+// boundedClass is a whole-string pattern of one character class repeated
+// {m,n} times, the one shape the relay uses past RE2's 1000-repeat cap
+// (the push token's {1,1024}).
+var boundedClass = regexp.MustCompile(`^\^(\[[^\]]+\])\{(\d+),(\d+)\}\$$`)
+
+// compilePattern compiles a schema pattern. A boundedClass pattern RE2
+// refuses becomes the class repeated freely plus rune-length bounds, which
+// is the same language; anything else RE2 refuses fails loudly.
+func compilePattern(p string) (re *regexp.Regexp, minLen, maxLen int, err error) {
+	re, err = regexp.Compile(p)
+	if err == nil {
+		return re, 0, math.MaxInt, nil
+	}
+	m := boundedClass.FindStringSubmatch(p)
+	if m == nil {
+		return nil, 0, 0, err
+	}
+	minLen, _ = strconv.Atoi(m[2])
+	maxLen, _ = strconv.Atoi(m[3])
+	re, err = regexp.Compile("^" + m[1] + "*$")
+	return re, minLen, maxLen, err
 }
 
 func validateNumber(s schema, v json.Number, at string) error {

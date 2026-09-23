@@ -1,5 +1,7 @@
 // Package relaytest is an in-memory relay on httptest for the agent's tests:
-// it verifies Clair-Ed25519 signatures, holds pairings and per-pair
+// it verifies Clair-Ed25519 canonical v2 signatures as the relay does with
+// AUTH_NONCE=required (a nonce on every request, spent once per key, the
+// Host bound; relay ADR 2026-09.9vsq), holds pairings and per-pair
 // mailboxes, streams envelopes and presence over SSE with bounded ends, and
 // records what clients did. It implements the relay's published contract
 // (internal/relay/testdata/openapi.json, checked by the relay package's
@@ -10,7 +12,9 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,7 +29,6 @@ import (
 	"time"
 
 	"claircode.app/clair-agent/internal/envelope"
-	"claircode.app/clair-agent/internal/relay"
 )
 
 // ReadHeaderTimeout is for a server that mounts the fake's handler itself.
@@ -43,6 +46,7 @@ const (
 	pairingGrace   = 15 * time.Minute
 	pollInterval   = 5 * time.Millisecond
 	defaultRetryMS = 10
+	maxPushToken   = 1024
 )
 
 // The relay's id shapes: a pair or pairing id, an X25519 key, a Last-Event-ID.
@@ -50,14 +54,29 @@ var (
 	idPattern     = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 	keyPattern    = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 	lastIDPattern = regexp.MustCompile(`^\d{1,15}$`)
+	// FCM's token alphabet, as the relay checks it (`^[A-Za-z0-9_:.-]{1,1024}$`;
+	// RE2 caps a repeat at 1000, so the length is checked apart).
+	pushTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_:.-]+$`)
 )
 
-// Recorded is one authenticated request the fake served.
+// The relay's Authorization parse (clair-server src/auth/canonical.ts).
+var (
+	authHeaderPattern = regexp.MustCompile(`(?s)^Clair-Ed25519\s+(.+)$`)
+	authParamPattern  = regexp.MustCompile(`^([a-z]+)=([^,\s]+)$`)
+	base64URLPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	tsPattern         = regexp.MustCompile(`^\d{1,12}$`)
+	noncePattern      = regexp.MustCompile(`^[A-Za-z0-9_-]{22,43}$`)
+)
+
+// Recorded is one request the fake answered. Nonce is the one its header
+// carried; Key and TS are empty unless the signature verified.
 type Recorded struct {
 	Method     string
 	RequestURI string
+	Host       string
 	Key        string
 	TS         int64
+	Nonce      string
 	Status     int
 }
 
@@ -83,8 +102,17 @@ type pairingRec struct {
 type pairRec struct {
 	host, phone string
 	revoked     bool
-	// Open stream counts per role, for presence.
-	hostOpen, phoneOpen int
+	// The stream that owns each side's presence, 0 for none: the newest
+	// open wins and an older one ends quietly (relay ADR 2026-09.7fc3).
+	hostStream, phoneStream int64
+}
+
+// owner is the stream id owning role's side.
+func (p *pairRec) owner(role Role) *int64 {
+	if role == RoleHost {
+		return &p.hostStream
+	}
+	return &p.phoneStream
 }
 
 type row struct {
@@ -123,6 +151,13 @@ type Fake struct {
 	FailNext int
 	// KeepaliveMS sends a `: keepalive` comment on /events at that cadence; 0 sends none.
 	KeepaliveMS int
+	// ReplayNext answers the next ReplayNext requests that verify 401
+	// replay, as if their nonce had been spent already.
+	ReplayNext int
+	// EdgeLimitNext answers the next EdgeLimitNext requests with the
+	// platform firewall's 429: plain text, no Retry-After, before the relay
+	// sees them.
+	EdgeLimitNext int
 
 	pairings  map[string]*pairingRec
 	pairs     map[string]*pairRec
@@ -132,6 +167,9 @@ type Fake struct {
 	maxFlight map[string]int
 	requests  []Recorded
 	lastIDs   []string
+	// nonces holds each spent key|nonce until its ts leaves the skew window.
+	nonces    map[string]time.Time
+	streamSeq int64
 }
 
 // New starts a fake relay over plain HTTP; Close it with the test's cleanup.
@@ -162,6 +200,7 @@ func newFake() *Fake {
 		pairs:     make(map[string]*pairRec),
 		inflight:  make(map[string]int),
 		maxFlight: make(map[string]int),
+		nonces:    make(map[string]time.Time),
 	}
 }
 
@@ -196,7 +235,7 @@ func (f *Fake) Rows(pairID string, dir envelope.Dir) []envelope.Envelope {
 	return out
 }
 
-// Requests returns every authenticated request so far.
+// Requests returns every request answered so far.
 func (f *Fake) Requests() []Recorded {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -247,8 +286,9 @@ func (f *Fake) appendRow(env envelope.Envelope) (cursor int64, dup bool) {
 
 // authed is the verified identity of a request.
 type authed struct {
-	key string
-	ts  int64
+	key   string
+	ts    int64
+	nonce string
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -285,9 +325,21 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	who, ok := f.authenticate(rec, r, body)
 	f.mu.Lock()
-	f.requests = append(f.requests, Recorded{Method: r.Method, RequestURI: r.URL.RequestURI(), Key: who.key, TS: who.ts, Status: rec.status})
+	edge := f.EdgeLimitNext > 0
+	if edge {
+		f.EdgeLimitNext--
+	}
+	f.mu.Unlock()
+	var who authed
+	ok := false
+	if edge {
+		http.Error(rec, "Too Many Requests", http.StatusTooManyRequests)
+	} else {
+		who, ok = f.authenticate(rec, r, body)
+	}
+	f.mu.Lock()
+	f.requests = append(f.requests, Recorded{Method: r.Method, RequestURI: r.URL.RequestURI(), Host: r.Host, Key: who.key, TS: who.ts, Nonce: who.nonce, Status: rec.status})
 	idx := len(f.requests) - 1
 	fail := f.FailNext > 0
 	if ok && fail {
@@ -323,7 +375,10 @@ func (s *statusRecorder) WriteHeader(code int) {
 // Unwrap lets http.NewResponseController reach the flusher.
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
-// authenticate verifies the Clair-Ed25519 header, answering 401 itself.
+// authenticate verifies the Clair-Ed25519 header as the relay's guard does
+// with AUTH_NONCE=required, in its order — parse, skew, body, signature,
+// then spend the nonce — answering 401 (or 415) itself. The canonical string
+// is built here, not borrowed from the client, so a client bug cannot hide.
 func (f *Fake) authenticate(w http.ResponseWriter, r *http.Request, body []byte) (authed, bool) {
 	f.mu.Lock()
 	now := f.Now()
@@ -338,44 +393,77 @@ func (f *Fake) authenticate(w http.ResponseWriter, r *http.Request, body []byte)
 		writeJSON(w, http.StatusUnauthorized, resp)
 		return false
 	}
-	header := r.Header.Get("Authorization")
-	scheme, params, found := strings.Cut(header, " ")
-	if !found || scheme != "Clair-Ed25519" {
+	m := authHeaderPattern.FindStringSubmatch(strings.TrimSpace(r.Header.Get("Authorization")))
+	if m == nil {
 		return authed{}, unauthorized("malformed")
 	}
 	fields := make(map[string]string)
-	for part := range strings.SplitSeq(params, ",") {
-		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok {
+	for part := range strings.SplitSeq(m[1], ",") {
+		kv := authParamPattern.FindStringSubmatch(strings.TrimSpace(part))
+		if kv == nil {
 			return authed{}, unauthorized("malformed")
 		}
-		fields[k] = v
+		if _, dup := fields[kv[1]]; dup {
+			return authed{}, unauthorized("malformed")
+		}
+		fields[kv[1]] = kv[2]
 	}
-	key, err := base64.RawURLEncoding.Strict().DecodeString(fields["key"])
-	if err != nil || len(key) != ed25519.PublicKeySize {
-		return authed{}, unauthorized("malformed")
+	// Exactly key, ts, nonce and sig: a v1 header (no nonce) is malformed
+	// once the relay requires nonces.
+	nonce := fields["nonce"]
+	carried := authed{nonce: nonce}
+	if len(fields) != 4 || fields["key"] == "" || fields["ts"] == "" || fields["sig"] == "" || nonce == "" {
+		return carried, unauthorized("malformed")
 	}
-	sig, err := base64.RawURLEncoding.Strict().DecodeString(fields["sig"])
-	if err != nil || len(sig) != ed25519.SignatureSize {
-		return authed{}, unauthorized("malformed")
+	if !base64URLPattern.MatchString(fields["key"]) || !base64URLPattern.MatchString(fields["sig"]) ||
+		!tsPattern.MatchString(fields["ts"]) || !noncePattern.MatchString(nonce) {
+		return carried, unauthorized("malformed")
 	}
-	ts, err := strconv.ParseInt(fields["ts"], 10, 64)
-	if err != nil {
-		return authed{}, unauthorized("malformed")
-	}
+	ts, _ := strconv.ParseInt(fields["ts"], 10, 64)
 	if d := now.Unix() - ts; d > int64(skewMax/time.Second) || -d > int64(skewMax/time.Second) {
-		return authed{}, unauthorized("skew")
+		return carried, unauthorized("skew")
+	}
+	if r.Host == "" {
+		return carried, unauthorized("malformed")
 	}
 	// The relay hashes the bytes its JSON parser consumed; any other body
 	// cannot be verified and is refused before the signature is checked.
 	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); len(body) > 0 && mt != "application/json" {
 		refuse(w, http.StatusUnsupportedMediaType, "unsupported_media_type")
-		return authed{}, false
+		return carried, false
 	}
-	if !ed25519.Verify(ed25519.PublicKey(key), relay.Canonical(r.Method, r.URL.RequestURI(), ts, body), sig) {
-		return authed{}, unauthorized("signature")
+	key, _ := base64.RawURLEncoding.DecodeString(fields["key"])
+	sig, _ := base64.RawURLEncoding.DecodeString(fields["sig"])
+	sum := sha256.Sum256(body)
+	canonical := strings.Join([]string{
+		"clair-v2", strings.ToUpper(r.Method), strings.ToLower(r.Host), r.URL.RequestURI(),
+		fields["ts"], nonce, hex.EncodeToString(sum[:]),
+	}, "\n")
+	if len(key) != ed25519.PublicKeySize || len(sig) != ed25519.SignatureSize ||
+		!ed25519.Verify(ed25519.PublicKey(key), []byte(canonical), sig) {
+		return carried, unauthorized("signature")
 	}
-	return authed{key: fields["key"], ts: ts}, true
+	// Spent only after the signature verifies, so nobody can burn another
+	// key's nonces; kept until ts leaves the skew window.
+	f.mu.Lock()
+	for k, exp := range f.nonces {
+		if now.After(exp) {
+			delete(f.nonces, k)
+		}
+	}
+	spent := fields["key"] + "|" + nonce
+	_, replayed := f.nonces[spent]
+	if f.ReplayNext > 0 {
+		f.ReplayNext--
+		replayed = true
+	} else if !replayed {
+		f.nonces[spent] = time.Unix(ts, 0).Add(skewMax)
+	}
+	f.mu.Unlock()
+	if replayed {
+		return carried, unauthorized("replay")
+	}
+	return authed{key: fields["key"], ts: ts, nonce: nonce}, true
 }
 
 // route dispatches an authenticated request.
@@ -486,7 +574,7 @@ func (f *Fake) completePairing(w http.ResponseWriter, who authed, id string, bod
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if dec.Decode(&req) != nil || !keyPattern.MatchString(req.PhonePub) || req.Envelope == nil ||
-		(req.PushToken != nil && (*req.PushToken == "" || len(*req.PushToken) > 4096)) {
+		(req.PushToken != nil && (len(*req.PushToken) > maxPushToken || !pushTokenPattern.MatchString(*req.PushToken))) {
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
@@ -502,6 +590,8 @@ func (f *Fake) completePairing(w http.ResponseWriter, who authed, id string, bod
 	switch {
 	case !ok:
 		refuse(w, http.StatusNotFound, "pairing_not_found")
+	case p.host == who.key:
+		refuse(w, http.StatusBadRequest, "self_pairing")
 	case p.completed:
 		refuse(w, http.StatusConflict, "pairing_used")
 	case !f.Now().Before(p.expiresAt):
@@ -721,20 +811,17 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID
 	f.mu.Lock()
 	f.lastIDs = append(f.lastIDs, r.Header.Get("Last-Event-ID"))
 	p := f.pairs[pairID]
-	if role == RoleHost {
-		p.hostOpen++
-	} else {
-		p.phoneOpen++
-	}
+	f.streamSeq++
+	mine := f.streamSeq
+	*p.owner(role) = mine
 	silent := f.Silent
 	keepaliveMS := f.KeepaliveMS
 	f.mu.Unlock()
 	defer func() {
+		// Only the owner's close clears the side; a superseded one clears nothing.
 		f.mu.Lock()
-		if role == RoleHost {
-			p.hostOpen--
-		} else {
-			p.phoneOpen--
+		if *p.owner(role) == mine {
+			*p.owner(role) = 0
 		}
 		f.mu.Unlock()
 	}()
@@ -750,11 +837,12 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID
 		f.mu.Lock()
 		limit, retry := f.StreamLimit, f.RetryMS
 		revoked := p.revoked
-		peerOpen := p.phoneOpen
+		superseded := *p.owner(role) != mine
 		peer := RolePhone
 		if role == RolePhone {
-			peerOpen, peer = p.hostOpen, RoleHost
+			peer = RoleHost
 		}
+		peerOpen := *p.owner(peer) != 0
 		var next *row
 		for i := range f.rows {
 			if f.rows[i].pair == pairID && f.rows[i].dir == inbound && f.rows[i].cursor > last {
@@ -767,8 +855,12 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request, who authed, pairID
 			write(fmt.Sprintf("id: %d\nevent: revoked\ndata: %s\n\n", last, mustJSON(map[string]string{"pairId": pairID})))
 			return
 		}
+		if superseded {
+			// A newer stream owns this side: end with no event and no retry:.
+			return
+		}
 		state := "idle"
-		if peerOpen > 0 {
+		if peerOpen {
 			state = "connected"
 		}
 		if state != peerState {

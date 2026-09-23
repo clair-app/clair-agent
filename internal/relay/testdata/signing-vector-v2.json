@@ -1,0 +1,14 @@
+{
+  "authorization": "Clair-Ed25519 key=11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo, ts=1700000000, nonce=AAECAwQFBgcICQoLDA0ODw, sig=jmoArGD5P6Tw_OvltRb39JZEQzh8GQSCWb6ebp6FMQfn8Twwbvv_YW599RQtHoWvvZZChpfUlz4k9IeBpOnSCw",
+  "bodyHex": "7b22656e76656c6f706573223a5b5d7d",
+  "canonical": "clair-v2\nPOST\nrelay.claircode.app\n/v1/pairs/abc/envelopes?x=1\n1700000000\nAAECAwQFBgcICQoLDA0ODw\n00e117c0b667aec6c72af889a903c201cc31fb23c947b7c9509aee634eff89c9",
+  "host": "relay.claircode.app",
+  "method": "POST",
+  "nonce": "AAECAwQFBgcICQoLDA0ODw",
+  "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "requestURI": "/v1/pairs/abc/envelopes?x=1",
+  "seedHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "signatureB64": "jmoArGD5P6Tw_OvltRb39JZEQzh8GQSCWb6ebp6FMQfn8Twwbvv_YW599RQtHoWvvZZChpfUlz4k9IeBpOnSCw",
+  "source": "RFC 8032 §7.1 TEST 1 key; canonical v2 as pinned by clair-server ADR 2026-09.9vsq (2026-09-22)",
+  "ts": 1700000000
+}

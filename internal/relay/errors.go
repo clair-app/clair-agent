@@ -9,7 +9,8 @@ import (
 // Sentinels for the relay's answers, testable with errors.Is. A *StatusError
 // wraps the one that fits and carries the detail.
 var (
-	// ErrUnauthorized is a 401 the client could not fix by correcting its clock.
+	// ErrUnauthorized is a 401 the client could not fix by correcting its
+	// clock or re-signing with a fresh nonce.
 	ErrUnauthorized = errors.New("relay: unauthorised")
 	// ErrBadRequest is a 400: an envelope whose dir does not match the caller's
 	// role, a pair that does not match the path, a malformed body.
@@ -44,7 +45,8 @@ type StatusError struct {
 	Status int
 	// Code is the body's `error` field, when the body was JSON.
 	Code string
-	// Reason is a 401's `reason`: skew, signature or malformed.
+	// Reason is a 401's `reason`: skew, signature, malformed or replay (a
+	// nonce the relay has already seen from this key).
 	Reason string
 	// RetryAfter is a 429's Retry-After, clamped to RetryAfterMax; zero when absent.
 	RetryAfter time.Duration

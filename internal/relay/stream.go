@@ -52,8 +52,10 @@ type Event struct {
 // stops the stream and is returned by Stream as is.
 type Handler func(ctx context.Context, ev Event) error
 
-// errRetryNow says a connection failed for a reason already fixed (a
-// corrected clock): reconnect without waiting.
+// errRetryNow says a connection failed for a reason a re-signed request
+// fixes (a corrected clock, a spent nonce): reconnect without waiting, once.
+// It wraps the *StatusError, which follow surfaces if the retry is refused
+// the same way.
 var errRetryNow = errors.New("relay: retry now")
 
 // errIdle says the idle watchdog closed a silent stream.
@@ -68,9 +70,10 @@ func (e *handlerError) Unwrap() error { return e.err }
 
 // Stream follows GET /v1/pairs/{pair}/events from last (the Last-Event-ID;
 // empty drains from the oldest surviving row) and hands every event to h. It
-// owns reconnection: a clean bounded end is followed after the relay's
-// `retry:`, a failed connection after a jittered exponential backoff, a
-// corrected clock immediately. It returns when ctx ends, when h returns an
+// owns reconnection: a clean bounded end (the deadline's, or a quiet end
+// because a newer stream took over the pair side) is followed after the
+// relay's `retry:`, a failed connection after a jittered exponential backoff,
+// a corrected clock or a spent nonce immediately, once. It returns when ctx ends, when h returns an
 // error, with ErrRevoked after a `revoked` event or a 410, and with the
 // relay's answer for anything a reconnect cannot fix (404, 401, …).
 func (c *Client) Stream(ctx context.Context, pair string, last Cursor, h Handler) error {
@@ -145,7 +148,7 @@ func (c *Client) WaitPairing(ctx context.Context, pairingID string) (Completed, 
 }
 
 // openStream performs the signed GET for a stream and returns the response
-// once it is a 200. A 401 the clock can fix yields errRetryNow.
+// once it is a 200. A 401 a re-signed request can fix yields errRetryNow.
 func (c *Client) openStream(ctx context.Context, path, lastID string) (*http.Response, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
@@ -166,9 +169,8 @@ func (c *Client) openStream(ctx context.Context, path, lastID string) (*http.Res
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := readBody(resp.Body, maxErrorBody)
 	serr := c.statusError(path, resp, data)
-	if resp.StatusCode == http.StatusUnauthorized && c.correctSkew(serr, resp.Header, data) {
-		c.log.Info("relay clock skew corrected", "path", path, "skew_s", c.skew.Load())
-		return nil, errRetryNow
+	if resp.StatusCode == http.StatusUnauthorized && c.resign(path, serr, resp.Header, data) {
+		return nil, fmt.Errorf("%w: %w", errRetryNow, serr)
 	}
 	return nil, serr
 }
@@ -221,9 +223,15 @@ func (c *Client) connectOnce(ctx context.Context, path, lastID string, fn func(s
 // network's failures, resuming from the last applied id each time.
 func (c *Client) follow(ctx context.Context, path, lastID string, fn func(sseEvent) error) error {
 	attempt := 0
+	// retriedNow is set after an immediate retry, so a second refusal in a
+	// row is surfaced instead of looping (ADR 2026-09.n68c).
+	retriedNow := false
 	for {
 		newLast, retry, delivered, err := c.connectOnce(ctx, path, lastID, fn)
 		lastID = newLast
+		if !errors.Is(err, errRetryNow) {
+			retriedNow = false
+		}
 		var wait time.Duration
 		switch {
 		case err == nil:
@@ -237,6 +245,13 @@ func (c *Client) follow(ctx context.Context, path, lastID string, fn func(sseEve
 		case ctx.Err() != nil:
 			return ctx.Err()
 		case errors.Is(err, errRetryNow):
+			if retriedNow {
+				if serr, ok := errors.AsType[*StatusError](err); ok {
+					return serr
+				}
+				return err
+			}
+			retriedNow = true
 			wait = 0
 		default:
 			if herr, ok := errors.AsType[*handlerError](err); ok {

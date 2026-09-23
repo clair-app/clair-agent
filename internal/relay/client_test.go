@@ -15,21 +15,29 @@ import (
 	"time"
 )
 
-func TestSigningVector(t *testing.T) {
+// signingVectorPath is the relay's canonical v2 vector (RFC 8032 §7.1 TEST 1
+// key, a fixed nonce and host), copied unchanged from clair-server commit
+// d74f7a7 (`src/auth/testdata/signing-vector-v2.json`, relay ADR
+// 2026-09.9vsq). A refresh updates both; a mismatch is a bug on one side.
+const signingVectorPath = "testdata/signing-vector-v2.json"
+
+func TestSigningVectorV2(t *testing.T) {
 	t.Parallel()
 
 	var v struct {
 		SeedHex       string `json:"seedHex"`
 		PublicKeyHex  string `json:"publicKeyHex"`
 		Method        string `json:"method"`
+		Host          string `json:"host"`
 		RequestURI    string `json:"requestURI"`
 		TS            int64  `json:"ts"`
+		Nonce         string `json:"nonce"`
 		BodyHex       string `json:"bodyHex"`
 		Canonical     string `json:"canonical"`
 		SignatureB64  string `json:"signatureB64"`
 		Authorization string `json:"authorization"`
 	}
-	data, err := os.ReadFile("testdata/signing-vector.json")
+	data, err := os.ReadFile(signingVectorPath)
 	if err != nil {
 		t.Fatalf("read vector: %v", err)
 	}
@@ -42,11 +50,11 @@ func TestSigningVector(t *testing.T) {
 		t.Fatalf("public key = %s, want %s (RFC 8032 TEST 1)", got, v.PublicKeyHex)
 	}
 	body, _ := hex.DecodeString(v.BodyHex)
-	if got := Canonical(v.Method, v.RequestURI, v.TS, body); string(got) != v.Canonical {
+	if got := Canonical(v.Method, v.Host, v.RequestURI, v.TS, v.Nonce, body); string(got) != v.Canonical {
 		t.Errorf("Canonical = %q, want %q", got, v.Canonical)
 	}
 	s := NewSigner(priv)
-	got := s.Authorization(v.Method, v.RequestURI, v.TS, body)
+	got := s.Authorization(v.Method, v.Host, v.RequestURI, v.TS, v.Nonce, body)
 	if got != v.Authorization {
 		t.Errorf("Authorization = %q, want %q", got, v.Authorization)
 	}
@@ -62,19 +70,46 @@ func TestSigningVector(t *testing.T) {
 	}
 }
 
-func TestCanonicalHashesTheBody(t *testing.T) {
+func TestCanonicalHashesTheBodyAndLowersTheHost(t *testing.T) {
 	t.Parallel()
 
-	empty := Canonical("POST", "/v1/pairings", 1, nil)
+	const nonce = "AAECAwQFBgcICQoLDA0ODw"
+	empty := Canonical("POST", "Relay.Example:8443", "/v1/pairings", 1, nonce, nil)
 	if !bytes.HasSuffix(empty, []byte("\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")) {
 		t.Errorf("empty body canonical = %q, want the SHA-256 of nothing", empty)
 	}
-	withBody := Canonical("POST", "/v1/pairings", 1, []byte("{}"))
+	if !bytes.HasPrefix(empty, []byte("clair-v2\nPOST\nrelay.example:8443\n/v1/pairings\n1\n"+nonce+"\n")) {
+		t.Errorf("canonical = %q, want the v2 label, the method and the lower-cased host with its port", empty)
+	}
+	withBody := Canonical("POST", "relay.example:8443", "/v1/pairings", 1, nonce, []byte("{}"))
 	if bytes.Equal(withBody, empty) {
 		t.Error("a body did not change the canonical string")
 	}
-	if strings.Count(string(withBody), "\n") != 3 {
-		t.Errorf("canonical = %q, want exactly three newlines", withBody)
+	if strings.Count(string(withBody), "\n") != 6 {
+		t.Errorf("canonical = %q, want exactly six newlines", withBody)
+	}
+}
+
+func TestNewNonce(t *testing.T) {
+	t.Parallel()
+
+	src := bytes.NewReader(bytes.Repeat([]byte{0xfb}, 2*NonceSize))
+	a, err := NewNonce(src)
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+	if src.Len() != NonceSize {
+		t.Errorf("NewNonce read %d bytes, want %d", 2*NonceSize-src.Len(), NonceSize)
+	}
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(a)
+	if err != nil || len(a) != 22 || len(raw) != NonceSize {
+		t.Errorf("nonce = %q (%d chars, %v), want 22 chars of unpadded base64url", a, len(a), err)
+	}
+	if strings.ContainsAny(a, "+/=") {
+		t.Errorf("nonce = %q, want the URL alphabet without padding", a)
+	}
+	if _, err := NewNonce(bytes.NewReader(make([]byte, NonceSize-1))); err == nil {
+		t.Error("NewNonce on a short reader: err = nil, want an error")
 	}
 }
 

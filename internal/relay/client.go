@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -89,6 +90,9 @@ type Options struct {
 	Sleep func(context.Context, time.Duration) error
 	// Jitter returns a value in [0, 1) for the backoff; nil means math/rand.
 	Jitter func() float64
+	// Entropy is where request nonces come from; nil means crypto/rand.
+	// Tests pin it to reproduce a header.
+	Entropy io.Reader
 	// Logger receives static messages with sizes, paths and ids — never bodies
 	// or headers. Nil discards.
 	Logger *slog.Logger
@@ -105,14 +109,15 @@ type Client struct {
 	signer *Signer
 	// skew is the seconds to add to the local clock so the relay accepts the
 	// timestamp; learnt from a 401 (RELAY.md §7.3, §13).
-	skew   atomic.Int64
-	slots  slots
-	now    func() time.Time
-	sleep  func(context.Context, time.Duration) error
-	jitter func() float64
-	idle   time.Duration
-	ua     string
-	log    *slog.Logger
+	skew    atomic.Int64
+	slots   slots
+	now     func() time.Time
+	sleep   func(context.Context, time.Duration) error
+	jitter  func() float64
+	entropy io.Reader
+	idle    time.Duration
+	ua      string
+	log     *slog.Logger
 }
 
 // New builds a client for the relay in opts, signing as auth.
@@ -127,6 +132,11 @@ func New(auth ed25519.PrivateKey, opts Options) (*Client, error) {
 	}
 	if (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
 		return nil, fmt.Errorf("relay: base url %q: want http(s)://host", raw)
+	}
+	// The Host header is signed (ADR 2026-09.n68c), and Go sends an IDN host
+	// punycoded: the signed and the sent host would differ.
+	if !isASCII(base.Host) {
+		return nil, fmt.Errorf("relay: base url %q: give the host in its ASCII (punycode) form", raw)
 	}
 	base.Path = strings.TrimSuffix(base.Path, "/")
 	base.RawQuery, base.Fragment = "", ""
@@ -146,14 +156,15 @@ func New(auth ed25519.PrivateKey, opts Options) (*Client, error) {
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: opts.RootCAs},
 	}
 	c := &Client{
-		base:   base,
-		signer: NewSigner(auth),
-		now:    opts.Now,
-		sleep:  opts.Sleep,
-		jitter: opts.Jitter,
-		idle:   opts.StreamIdleTimeout,
-		ua:     opts.UserAgent,
-		log:    opts.Logger,
+		base:    base,
+		signer:  NewSigner(auth),
+		now:     opts.Now,
+		sleep:   opts.Sleep,
+		jitter:  opts.Jitter,
+		entropy: opts.Entropy,
+		idle:    opts.StreamIdleTimeout,
+		ua:      opts.UserAgent,
+		log:     opts.Logger,
 	}
 	c.http = &http.Client{
 		Transport: transport,
@@ -169,6 +180,9 @@ func New(auth ed25519.PrivateKey, opts Options) (*Client, error) {
 	if c.jitter == nil {
 		c.jitter = rand.Float64
 	}
+	if c.entropy == nil {
+		c.entropy = cryptorand.Reader
+	}
 	if c.idle <= 0 {
 		c.idle = StreamIdleTimeout
 	}
@@ -179,6 +193,16 @@ func New(auth ed25519.PrivateKey, opts Options) (*Client, error) {
 		c.log = slog.New(slog.DiscardHandler)
 	}
 	return c, nil
+}
+
+// isASCII reports whether s is plain ASCII.
+func isASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // Key is the public key the client signs as, as the relay knows it.
@@ -210,7 +234,8 @@ type reply struct {
 }
 
 // newRequest builds a signed request for path (which may carry a query)
-// with an optional JSON body.
+// with an optional JSON body. Every call signs afresh — a new nonce and ts —
+// so a retry is never the same request twice (ADR 2026-09.n68c).
 func (c *Client) newRequest(ctx context.Context, method, path string, body []byte) (*http.Request, error) {
 	u := *c.base
 	p, query, _ := strings.Cut(path, "?")
@@ -228,14 +253,23 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body []byt
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.ua)
+	nonce, err := NewNonce(c.entropy)
+	if err != nil {
+		return nil, err
+	}
+	// The host the Host header will carry: what the relay verifies against.
+	host := req.Host
+	if host == "" {
+		host = req.URL.Host
+	}
 	ts := c.now().Unix() + c.skew.Load()
-	req.Header.Set("Authorization", c.signer.Authorization(method, req.URL.RequestURI(), ts, body))
+	req.Header.Set("Authorization", c.signer.Authorization(method, host, req.URL.RequestURI(), ts, nonce, body))
 	return req, nil
 }
 
-// do performs one non-streaming call, correcting the clock and retrying once
-// when the relay reports skew. A 2xx returns the reply; anything else is a
-// *StatusError.
+// do performs one non-streaming call, re-signing and retrying once when the
+// relay reports skew (after correcting the clock) or a spent nonce. A 2xx
+// returns the reply; anything else is a *StatusError.
 func (c *Client) do(ctx context.Context, method, path string, body []byte) (*reply, error) {
 	ctx, cancel := context.WithTimeout(ctx, UnaryTimeout)
 	defer cancel()
@@ -247,14 +281,13 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) (*rep
 		if serr == nil {
 			return r, nil
 		}
-		if serr.Status == http.StatusUnauthorized && attempt == 0 && c.correctSkew(serr, r.header, r.body) {
-			c.log.Info("relay clock skew corrected", "path", path, "skew_s", c.skew.Load())
+		if serr.Status == http.StatusUnauthorized && attempt == 0 && c.resign(path, serr, r.header, r.body) {
 			continue
 		}
 		c.log.Warn("relay request refused", "method", method, "path", path, "status", serr.Status, "code", serr.Code)
 		return nil, serr
 	}
-	return nil, fmt.Errorf("%w: %s %s still refused after correcting skew", ErrUnauthorized, method, path)
+	return nil, fmt.Errorf("%w: %s %s still refused after re-signing", ErrUnauthorized, method, path)
 }
 
 // once performs one call. A non-2xx answer comes back as a *StatusError with
@@ -338,6 +371,21 @@ func (*Client) statusError(path string, resp *http.Response, data []byte) *Statu
 		}
 	}
 	return e
+}
+
+// resign reports whether a 401 is one a freshly signed request can fix: a
+// spent nonce (`replay`, which a fresh nonce answers) or skew the relay's
+// clock corrects. A second refusal in a row is surfaced, never retried again.
+func (c *Client) resign(path string, serr *StatusError, header http.Header, data []byte) bool {
+	if serr.Reason == "replay" {
+		c.log.Info("relay refused a spent nonce, re-signing", "path", path)
+		return true
+	}
+	if c.correctSkew(serr, header, data) {
+		c.log.Info("relay clock skew corrected", "path", path, "skew_s", c.skew.Load())
+		return true
+	}
+	return false
 }
 
 // correctSkew adopts the relay's clock after a 401 that blames skew (or gives

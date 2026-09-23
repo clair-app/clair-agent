@@ -48,11 +48,11 @@ the behaviour. See "Relay contract" below.
 | §6 | `internal/pairing` | `clair pair`: mint, the QR (`rsc.io/qr`, half-blocks, `-qr ascii|none`, `-invert`), wait, prove the phone knows `k` by opening `hello`, confirm on the controlling terminal, `hello-ack`, write the pair file and `settings.json`, reload the daemon |
 | §6.1 | `internal/pairing` | Payload `0x01 ‖ pairingId[16] ‖ hostPub[32] ‖ k[16] ‖ relay-host?` as `https://<relay>/p#<base64url>`; version 6 at level L |
 | §6.5, §6.6 | `internal/claudecfg`, `internal/ojson` | The order-preserving `settings.json` merge, the `clair statusline` shim, snippet substitution and validation; `clair unpair`; `410` handling |
-| §7.2, §7.3 | `internal/relay` | SSE down + `POST` up (no WebSocket); `Authorization: Clair-Ed25519 …` with the relay's canonical string; skew from `serverTime`, then `Date`; bounded streams resumed with `Last-Event-ID`; one upload in flight per (pair, dir); `--relay-ca`, `HTTPS_PROXY` |
+| §7.2, §7.3 | `internal/relay` | SSE down + `POST` up (no WebSocket); `Authorization: Clair-Ed25519 key, ts, nonce, sig` over the relay's **canonical v2** (`"clair-v2"`, method, `Host`, target, ts, nonce, body hash; relay ADR 2026-09.9vsq, ours 2026-09.n68c): a fresh 16-byte `crypto/rand` nonce on every request, retries included; a `401 skew` (clock from `serverTime`, then `Date`) or `401 replay` is re-signed and retried once, a second refusal surfaced; bounded streams resumed with `Last-Event-ID`; one upload in flight per (pair, dir); `--relay-ca`, `HTTPS_PROXY` |
 | §7.4, §7.5 | `internal/tunnel`, `internal/record` | Cursor acks after *applying* envelopes, coalesced to 1 s; `wake` stamped from `hook_event_name`, `PostToolUse*` promoted to `soon` while a decide is held; TTLs |
-| §7.6 | `internal/tunnel`, `internal/ctl` | Presence shown by `clair status` |
+| §7.6 | `internal/tunnel`, `internal/ctl`, `internal/relay` | Presence shown by `clair status`. The newest `/events` stream owns a pair side's presence (relay ADR 2026-09.7fc3): an older one ends quietly, with no event and no `retry:`, and `Stream` treats that as a routine end and resumes with `Last-Event-ID`. The agent keeps exactly one `/events` stream per pair (`tunnel.pair.receiver`); a second would evict the first on every reconnect |
 | §12 | `internal/relay` | `HTTPS_PROXY` / `NO_PROXY` through `http.ProxyFromEnvironment`, system trust store, `--relay-ca` replaces it |
-| §13 | `internal/tunnel`, `internal/daemon` | Relay unreachable (queue, backoff), restart (`reset`), revoke (`410` → hooks and keys removed, daemon keeps serving `204`s), skew (`401` → adopt `serverTime`) |
+| §13 | `internal/tunnel`, `internal/daemon` | Relay unreachable (queue, backoff), restart (`reset`), revoke (`410` → hooks and keys removed, daemon keeps serving `204`s), skew (`401 skew` → adopt `serverTime`), a spent nonce (`401 replay` → re-sign once), an edge `429` without a JSON body or `Retry-After` (backoff) |
 | §14 | — | Phase 2 (tunnel + pair) is implemented; the agent's part of phase 3 (`wake`) too; OS service install, releases and `install.sh` are later plans |
 
 `internal/daemon` wires the above for `clair daemon`; `cmd/clair` is the dispatch.
@@ -72,6 +72,11 @@ Deliberate, all recorded in ADRs:
   once); the phone's 4 MiB → `413` body rule stays on the loopback.
 - **`clair statusline`** replaces the `sh clair-statusline.sh` shim (ADR 2026-09.evep).
 - **Config lives under `os.UserConfigDir()/clair`**, which is `~/.config/clair` on Linux only.
+- **Canonical v2 signing, and registration at mint/complete** (the relay's phase 4: ADRs
+  2026-09.9vsq and 2026-09.7fc3 in `clair-server`, ours 2026-09.n68c). RELAY.md §7.3 still shows
+  the three-parameter form and says a device registers on its first signed request. Its next
+  revision is deliberately deferred and folds these in. The agent signs v2 only, so it is ready
+  for the relay's `AUTH_NONCE=required`.
 
 ## Revision 3 (2026-09-22): presence
 
@@ -117,7 +122,11 @@ our layout, plus an independent HKDF in the tests.
 
 `internal/relay/testdata/openapi.json` is the relay's `openapi.json`, copied unchanged; the
 comment beside `specPath` in `internal/relay/contract_test.go` names the `clair-server`
-commit it was taken from, and a refresh updates both. `TestContract` drives the real client
+commit it was taken from, and a refresh updates both. `testdata/signing-vector-v2.json` is
+the relay's `src/auth/testdata/signing-vector-v2.json` under the same rule (`signingVectorPath`
+in `client_test.go`). `relaytest.Fake` verifies requests as the relay does with
+`AUTH_NONCE=required` (nonce single use per key, `Host` bound, no-nonce headers `malformed`) and
+builds its canonical string itself. `TestContract` drives the real client
 (and raw signed requests for the refusals the client never provokes) through
 `relaytest.Fake`, records every exchange and checks it against the document: route and
 method, declared status, an `error` code the response lists, JSON and SSE event schemas,
