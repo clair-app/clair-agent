@@ -18,7 +18,9 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"syscall"
@@ -28,7 +30,9 @@ import (
 	"claircode.app/clair-agent/internal/daemon"
 	"claircode.app/clair-agent/internal/hookserver"
 	"claircode.app/clair-agent/internal/hostname"
+	"claircode.app/clair-agent/internal/logfile"
 	"claircode.app/clair-agent/internal/relay"
+	"claircode.app/clair-agent/internal/service"
 	"claircode.app/clair-agent/internal/state"
 )
 
@@ -50,7 +54,8 @@ const (
 
 // deps are the process-level things a command needs, injected so `run` can
 // be tested without a process: the environment, the clock, entropy, stdin,
-// and where this binary and the home directory are.
+// and where this binary and the home directory are; for `clair service`, the
+// OS, the user, the temporary directory and a way to run the OS's commands.
 type deps struct {
 	getenv  func(string) string
 	now     func() time.Time
@@ -58,6 +63,11 @@ type deps struct {
 	stdin   io.Reader
 	exe     func() (string, error)
 	home    func() (string, error)
+	goos    string
+	uid     int
+	sid     func() (string, error)
+	tempDir string
+	runner  service.Runner
 }
 
 func main() {
@@ -70,7 +80,20 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), stopSignals()...)
 	defer stop()
-	return runWith(ctx, deps{getenv: os.Getenv, now: time.Now, entropy: rand.Reader, stdin: os.Stdin, exe: os.Executable, home: os.UserHomeDir}, args, stdout, stderr)
+	return runWith(ctx, deps{
+		getenv: os.Getenv, now: time.Now, entropy: rand.Reader, stdin: os.Stdin, exe: os.Executable, home: os.UserHomeDir,
+		goos: runtime.GOOS, uid: os.Getuid(), sid: userSID, tempDir: os.TempDir(), runner: service.Exec,
+	}, args, stdout, stderr)
+}
+
+// userSID is the current user's id: on Windows, the SID a scheduled task's
+// principal names.
+func userSID() (string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return u.Uid, nil
 }
 
 // stopSignals are the signals that end a command through its context, so it
@@ -103,6 +126,8 @@ func runWith(ctx context.Context, d deps, args []string, stdout, stderr io.Write
 		return cmdStatus(ctx, d, args[1:], stdout, stderr)
 	case "statusline":
 		return cmdStatusline(ctx, d, args[1:], stdout, stderr)
+	case "service":
+		return cmdService(ctx, d, args[1:], stdout, stderr)
 	case "hook-event":
 		return cmdHookEvent(ctx, d, args[1:], stderr)
 	case "version":
@@ -127,6 +152,7 @@ commands:
   pair        show a QR for the phone to scan; write the pair and the hooks
   unpair      revoke the pair, remove the hooks and the keys
   status      what the running agent is doing (exit 3 when it is not running)
+  service     install, start, stop or remove the agent as a login service
   statusline  the statusLine command settings.json points at: forward usage, run yours
   hook-event  the SessionStart command hook: forward stdin to the agent, never fail
   version     print the agent version
@@ -200,6 +226,7 @@ func cmdDaemon(ctx context.Context, d deps, args []string, stderr io.Writer) int
 	var cfg configFlags
 	cfg.register(fs)
 	listen := fs.String("listen", "", "loopback address to serve hooks on (default from agent.json, else "+hookserver.ListenDefault+")")
+	logFile := fs.String("log-file", "", "write the log to this file, rotated at 10 MiB, instead of stderr")
 	var rf relayFlags
 	rf.register(fs)
 	if err := fs.Parse(args); err != nil {
@@ -211,6 +238,17 @@ func cmdDaemon(ctx context.Context, d deps, args []string, stderr io.Writer) int
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "clair daemon: unexpected argument %q\n", fs.Arg(0))
 		return exitUsage
+	}
+	// Under launchd or Task Scheduler nobody reads stderr, so with a log
+	// file everything this command says goes there, failures included.
+	if *logFile != "" {
+		lf, err := logfile.Open(*logFile, 0)
+		if err != nil {
+			fmt.Fprintf(stderr, "clair daemon: %v\n", err)
+			return exitError
+		}
+		defer func() { _ = lf.Close() }()
+		stderr = lf
 	}
 	dir, agent, err := openConfig(d, cfg, state.Agent{Listen: hookserver.ListenDefault, Relay: relay.DefaultBaseURL, LogLevel: "info"})
 	if err != nil {
@@ -355,15 +393,22 @@ func cmdHookEvent(ctx context.Context, d deps, args []string, stderr io.Writer) 
 // agentEndpoint reads the daemon's loopback origin and bearer from an
 // existing config directory; "" when there is none.
 func agentEndpoint(path string) (agentURL, token string) {
-	data, err := os.ReadFile(filepath.Join(path, "agent.json"))
-	if err != nil {
-		return "", ""
-	}
-	var agent state.Agent
-	if json.Unmarshal(data, &agent) != nil || agent.Listen == "" {
+	agent, ok := readAgent(path)
+	if !ok || agent.Listen == "" {
 		return "", ""
 	}
 	return "http://" + agent.Listen, agent.Token
+}
+
+// readAgent reads agent.json from a config directory without creating
+// either; ok is false when there is none to read.
+func readAgent(path string) (state.Agent, bool) {
+	var agent state.Agent
+	data, err := os.ReadFile(filepath.Join(path, "agent.json"))
+	if err != nil || json.Unmarshal(data, &agent) != nil {
+		return state.Agent{}, false
+	}
+	return agent, true
 }
 
 // buildVersion prefers the linker-injected values and falls back to what the

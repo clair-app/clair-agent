@@ -74,7 +74,12 @@ func Run(ctx context.Context, o Options) error {
 	if o.Dir == nil || o.Entropy == nil {
 		return errors.New("daemon: a config directory and an entropy source are required")
 	}
-	d := &daemon{opts: o, log: o.Logger, now: o.Now, clients: make(map[string]tunnel.Relay), loaded: make(map[string]struct{})}
+	// A stop through the control surface ends Run exactly as ctx would:
+	// where a service manager can only kill (Task Scheduler's End), this is
+	// the clean way down.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	d := &daemon{opts: o, log: o.Logger, now: o.Now, stop: stop, clients: make(map[string]tunnel.Relay), loaded: make(map[string]struct{})}
 	if d.log == nil {
 		d.log = slog.New(slog.DiscardHandler)
 	}
@@ -171,6 +176,8 @@ type daemon struct {
 	listen    string
 	hostname  string
 	tunnel    *tunnel.Tunnel
+	// stop cancels Run's context (the control surface's stop).
+	stop context.CancelFunc
 
 	mu      sync.Mutex
 	clients map[string]tunnel.Relay
@@ -297,6 +304,9 @@ func (d *daemon) setLoaded(configs []tunnel.PairConfig) {
 	d.mu.Unlock()
 	d.tunnel.SetPairs(configs)
 }
+
+// Stop begins the same clean shutdown a signal does.
+func (d *daemon) Stop() { d.stop() }
 
 // ReleasePair stops a pair — its held decides answered, its stream released
 // at the relay, its last counters written — and hands its file to the CLI

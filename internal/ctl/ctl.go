@@ -1,7 +1,7 @@
 // Package ctl is the daemon's control surface as the CLI sees it: the JSON it
 // answers on the loopback listener under /clair/ctl and a client for it.
 // `clair status` reads it; `clair pair` asks the daemon to release a pair and
-// to reload. It shares the hook listener but not the hook bearer: the admin
+// to reload; `clair service stop` asks it to stop. It shares the hook listener but not the hook bearer: the admin
 // token never leaves the config directory.
 package ctl
 
@@ -25,6 +25,7 @@ const Prefix = "/clair/ctl/"
 const (
 	PathStatus = Prefix + "status"
 	PathReload = Prefix + "reload"
+	PathStop   = Prefix + "stop"
 	PathPairs  = Prefix + "pairs/"
 )
 
@@ -125,6 +126,14 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 // Reload asks the daemon to re-read its keys and pairs.
 func (c *Client) Reload(ctx context.Context) error {
 	_, err := c.call(ctx, http.MethodPost, PathReload)
+	return err
+}
+
+// Stop asks the daemon to shut down the way a SIGTERM would: held decides
+// answered, queues drained, streams released. It returns once the daemon has
+// accepted; the listener goes a moment later.
+func (c *Client) Stop(ctx context.Context) error {
+	_, err := c.call(ctx, http.MethodPost, PathStop)
 	return err
 }
 

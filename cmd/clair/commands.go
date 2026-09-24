@@ -228,7 +228,7 @@ func cmdStatus(ctx context.Context, d deps, args []string, stdout, stderr io.Wri
 	st, err := controlClient(agent).Status(ctx)
 	if err != nil {
 		if errors.Is(err, ctl.ErrUnreachable) {
-			fmt.Fprintf(stdout, "no agent is running on %s; start it with `clair daemon`.\n", agent.Listen)
+			fmt.Fprintf(stdout, "no agent is running on %s; start it with `clair service install` (or `clair daemon` in a terminal).\n", agent.Listen)
 			return exitUnreachable
 		}
 		fmt.Fprintf(stderr, "clair status: %v\n", err)

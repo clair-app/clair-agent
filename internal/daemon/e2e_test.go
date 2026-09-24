@@ -604,6 +604,35 @@ func TestShutdownReleasesHeldDecides(t *testing.T) {
 	}
 }
 
+// A stop through the control surface is a clean shutdown, as a signal is:
+// Task Scheduler can only kill, so `clair service stop` asks first.
+func TestControlStopShutsDownCleanly(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	ctx := t.Context()
+	w.phone.next(t) // hello-ack
+	w.phone.next(t) // reset
+	control := &ctl.Client{Base: "http://" + w.addr, AdminToken: w.agent.AdminToken}
+	if err := control.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case err := <-w.done:
+		if err != nil {
+			t.Fatalf("daemon.Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon did not stop")
+	}
+	if got := w.hostCalls(http.MethodDelete, "/v1/pairs/"+pairID+"/events"); len(got) != 1 || got[0] != http.StatusNoContent {
+		t.Errorf("stream releases on a control stop = %v, want one 204", got)
+	}
+	if _, err := control.Status(ctx); !errors.Is(err, ctl.ErrUnreachable) {
+		t.Errorf("status after the stop: %v, want ctl.ErrUnreachable", err)
+	}
+}
+
 // The control surface's release stops a pair — its stream let go of at the
 // relay — and hands its file to the CLI, which seals the pair's goodbye from
 // it (ADR 2026-09.69ym): the daemon no longer deletes it.

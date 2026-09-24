@@ -1,0 +1,14 @@
+# Installed by `clair service install`; `clair service uninstall` removes it.
+[Unit]
+Description=Clair agent: Claude Code's hooks, tunnelled to your phone
+
+[Service]
+Type=simple
+ExecStart=/home/jane/.local/bin/clair daemon -config-dir /home/jane/.config/clair
+Environment="CLAUDE_CONFIG_DIR=/home/jane/.claude-work"
+Environment="HTTPS_PROXY=http://proxy.corp:3128"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

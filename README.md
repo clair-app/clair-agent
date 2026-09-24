@@ -13,8 +13,9 @@ fake relay and a fake phone (`internal/daemon/e2e_test.go`), and as real process
 `tools/relaysim` and `tools/phonesim`. A background subagent's permission prompt — which Claude
 Code shows in the terminal only once the hook lets go — is handed to the terminal at once while
 someone is typing at one, and held for the watch otherwise (RELAY.md §4.3; the daemon reads
-terminal input idle the way `w` does, no helper, no extra hook). Not yet: OS service installation,
-`install.sh`, releases — run `clair daemon` in a terminal for now — and the Android side of the
+terminal input idle the way `w` does, no helper, no extra hook). `clair service install` runs the
+daemon as your login service (verified on Linux; the macOS and Windows halves are written and
+tested, not yet run on hardware). Not yet: `install.sh`, releases, and the Android side of the
 relay.
 
 ```text
@@ -22,6 +23,7 @@ clair daemon      serve Claude Code's hooks on loopback and tunnel them to the p
 clair pair        show a QR for the phone to scan; write the pair and the hooks
 clair unpair      revoke the pair, remove the hooks and the keys
 clair status      what the running agent is doing
+clair service     install, start, stop or remove the daemon as a login service
 clair statusline  the statusLine command settings.json points at
 clair version
 ```
@@ -30,6 +32,19 @@ Config lives under `os.UserConfigDir()/clair` (`~/.config/clair` on Linux; `CLAI
 overrides): `agent.json` (the loopback bearer, the admin token, the relay URL), `host.key`, and
 one `pairs/<id>.json` per pair. Flags: `-config-dir`, `-log-level`, `-relay`, `-relay-ca`;
 `clair pair` adds `-qr unicode|ascii|none`, `-invert`, `-replace`, `-yes`.
+
+### Running as a service
+
+`clair service install` registers **this binary, where it is**, as a service of the current user
+and starts it: a systemd user unit on Linux (logs: `journalctl --user -u clair`), a LaunchAgent
+on macOS, and a Scheduled Task on Windows that starts at logon under `conhost --headless` (logs:
+`daemon.log` under `~/Library/Logs/clair` or `%LocalAppData%\clair`). It is never a system
+service, because the daemon reads the user's own terminal input idle.
+
+Put the binary somewhere it will stay before installing. `CLAUDE_CONFIG_DIR` and the proxy
+variables are captured from the installing shell. `clair service status` shows the state and the
+log location, `-print` shows what would be registered, and `clair service uninstall` removes it,
+leaving the pair and the hooks to `clair unpair`. ADR 2026-09.ahq8 records why.
 
 ## Development
 
@@ -57,6 +72,7 @@ together without a real relay.
 | `internal/relay` (+ `relaytest`) | The relay client: signed requests, SSE streams, batched uploads; an in-memory fake for tests. |
 | `internal/hookserver`, `tunnel`, `state`, `daemon`, `ctl` | The daemon: the loopback contract, the per-pair FIFO and held decides, the config directory, the control surface. |
 | `internal/claudecfg`, `ojson`, `pairing`, `hostname` | `clair pair` / `unpair`: the QR, the settings.json merge, the statusline shim. |
+| `internal/service`, `logfile` | `clair service`: the systemd unit, LaunchAgent and Scheduled Task; the daemon's own rotated log. |
 | `tools/adr`, `tools/phonesim`, `tools/relaysim` | Developer tools: decision records, a phone stand-in, the fake relay on a port. |
 | `.agents/` | Context for coding agents — rules, reference, decisions. `AGENTS.md` is the router. |
 

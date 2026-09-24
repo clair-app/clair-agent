@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>app.claircode.clair</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/jane/.local/bin/clair</string>
+		<string>daemon</string>
+		<string>-config-dir</string>
+		<string>/Users/jane/Library/Application Support/clair</string>
+		<string>-log-file</string>
+		<string>/Users/jane/Library/Logs/clair/daemon.log</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HTTPS_PROXY</key>
+		<string>http://proxy.corp:3128</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/jane/Library/Logs/clair/daemon.stderr.log</string>
+</dict>
+</plist>

@@ -1,0 +1,14 @@
+# Installed by `clair service install`; `clair service uninstall` removes it.
+[Unit]
+Description=Clair agent: Claude Code's hooks, tunnelled to your phone
+
+[Service]
+Type=simple
+ExecStart="/home/Jane Doe/bin/clair \"dev\"" daemon -config-dir "/home/Jane Doe/.config/100%%$$HOME\\clair" -relay-ca /etc/ssl/corp-ca.pem
+Environment="HTTPS_PROXY=http://user:p%%40ss$word@proxy:3128"
+Environment="NO_PROXY=localhost,.corp"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

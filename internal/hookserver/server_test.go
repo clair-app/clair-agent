@@ -64,6 +64,7 @@ func (f *fakeSink) Hold(ctx context.Context, rec record.Record, hook record.Hook
 type fakeControl struct {
 	mu       sync.Mutex
 	reloads  int
+	stops    int
 	released []string
 }
 
@@ -76,6 +77,12 @@ func (f *fakeControl) Reload(context.Context) error {
 	defer f.mu.Unlock()
 	f.reloads++
 	return nil
+}
+
+func (f *fakeControl) Stop() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stops++
 }
 
 func (f *fakeControl) ReleasePair(_ context.Context, id string) error {
@@ -460,6 +467,15 @@ func TestStatusAndControl(t *testing.T) {
 	}
 	if rec := do(t, s, "GET", ctl.PathReload, "Bearer "+admin, nil, nil); rec.Code != 405 {
 		t.Errorf("GET reload = %d, want 405", rec.Code)
+	}
+	if rec := do(t, s, "GET", ctl.PathStop, "Bearer "+admin, nil, nil); rec.Code != 405 || control.stops != 0 {
+		t.Errorf("GET stop = %d with %d stops, want 405 and none", rec.Code, control.stops)
+	}
+	if rec := do(t, s, "POST", ctl.PathStop, "Bearer "+token, nil, nil); rec.Code != 401 || control.stops != 0 {
+		t.Errorf("stop with the hook bearer = %d with %d stops, want 401 and none", rec.Code, control.stops)
+	}
+	if rec := do(t, s, "POST", ctl.PathStop, "Bearer "+admin, nil, nil); rec.Code != 202 || control.stops != 1 {
+		t.Errorf("stop = %d with %d stops, want 202 and 1", rec.Code, control.stops)
 	}
 	if rec := do(t, s, "DELETE", ctl.PathPairs+"p1", "Bearer "+admin, nil, nil); rec.Code != 204 || len(control.released) != 1 {
 		t.Errorf("release p1 = %d with %v released, want 204 and [p1]", rec.Code, control.released)

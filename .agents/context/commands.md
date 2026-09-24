@@ -41,6 +41,9 @@ linker-injected version.
 - `go test ./internal/envelope/ -run TestVectors -v` while iterating; finish with `make test`.
 - `go test ./internal/daemon/ -run TestEndToEnd -race -v` — fake Claude Code → daemon → fake
   relay → fake phone, in one process.
+- `go run ./cmd/clair service install -print` — the unit / plist / task XML this host would
+  register, changing nothing. The goldens for all three OSes are `internal/service/testdata`
+  and are compared byte for byte; a rendering change updates them deliberately.
 - `go run ./cmd/clair version`, `make run ARGS="daemon -log-level debug"`.
 - `bin/golangci-lint run ./internal/relay/` for one package — but always the `./bin` copy,
   never a `golangci-lint` from `$PATH` (a different version lints differently).
@@ -62,6 +65,14 @@ curl -X POST -H "Authorization: Bearer $(jq -r .token $CLAIR_CONFIG_DIR/agent.js
   'http://127.0.0.1:7317/clair/v1/hook/decide?timeout=30'   # → the phone's hookSpecificOutput, HTTP 200
 go run ./cmd/clair unpair
 ```
+
+To try the service the same way: with the scratch variables still exported,
+`clair daemon -listen 127.0.0.1:7417 -relay http://127.0.0.1:3000` once (it writes `agent.json`;
+Ctrl-C it) so the unit does not take a real agent's port, then `make build` and
+`bin/clair service install` (a `go run` binary is refused, so it must be a built one). Then
+`clair pair` / `phonesim` as above, `journalctl --user -u clair`, `bin/clair service status`, and
+`bin/clair service uninstall` at the end. The unit is real (`~/.config/systemd/user/clair.service`),
+so uninstall it before switching back to your own config.
 
 Against a real relay, drop `relaysim` and pass its URL to `-relay`; `tools/phonesim` still
 plays the phone until the Android `RelayIngress` exists. `CLAUDE_CONFIG_DIR` is Claude Code's

@@ -56,6 +56,8 @@ type Sink interface {
 type Controller interface {
 	Status(ctx context.Context) ctl.Status
 	Reload(ctx context.Context) error
+	// Stop begins a clean shutdown and returns at once.
+	Stop()
 	// ReleasePair stops a pair and hands its file to the caller;
 	// ctl.ErrNotFound is 404.
 	ReleasePair(ctx context.Context, pairID string) error
@@ -444,6 +446,13 @@ func (s *Server) serveControl(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	case r.URL.Path == ctl.PathStop:
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		s.log.Info("stop requested through the control surface")
+		s.control.Stop()
+		w.WriteHeader(http.StatusAccepted)
 	case strings.HasPrefix(r.URL.Path, ctl.PathPairs):
 		if !requireMethod(w, r, http.MethodDelete) {
 			return

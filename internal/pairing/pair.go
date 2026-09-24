@@ -474,7 +474,7 @@ func (o Options) sealControl(keys *envelope.Keys, pairID string, rec record.Reco
 // reloadDaemon tells a running daemon to pick the pair up, or says how to start one.
 func (o Options) reloadDaemon(ctx context.Context) {
 	if o.Daemon == nil {
-		fmt.Fprintln(o.Stdout, "Start the agent with `clair daemon` to bring the phone online.")
+		fmt.Fprintln(o.Stdout, "Start the agent with `clair service install` (or `clair daemon` in a terminal) to bring the phone online.")
 		return
 	}
 	err := o.Daemon.Reload(ctx)
@@ -482,7 +482,7 @@ func (o Options) reloadDaemon(ctx context.Context) {
 	case err == nil:
 		fmt.Fprintln(o.Stdout, "The running agent picked the pair up.")
 	case errors.Is(err, ctl.ErrUnreachable):
-		fmt.Fprintln(o.Stdout, "No agent is running; start it with `clair daemon`.")
+		fmt.Fprintln(o.Stdout, "No agent is running; start it with `clair service install` (or `clair daemon` in a terminal).")
 	default:
 		fmt.Fprintf(o.Stderr, "clair pair: the agent did not reload: %v\n", err)
 	}
