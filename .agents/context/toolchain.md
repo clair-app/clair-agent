@@ -78,6 +78,11 @@ adds `release`: `make dist` and an upload to the generic package registry (ADR 2
 build caches plus `./bin` are cached on `go.sum` + `Makefile`. Runs on merge requests, the
 default branch and tags.
 
+GitLab has no macOS runner, so `.github/workflows/macos.yml` runs on
+`github.com/clair-app/clair-agent`, a private push mirror of this project (GitLab a remote mirror,
+over SSH with a deploy key). It runs `make test` on darwin, the LaunchAgent for real, and
+claircode.app's `install.sh`. Push to GitLab, never to the mirror; results show on GitHub only.
+
 ## Git hooks (`.githooks/`)
 
 Opt in with `make hooks`. `pre-commit` extracts the *staged* ADR files and router to a
