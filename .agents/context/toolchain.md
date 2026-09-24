@@ -43,6 +43,9 @@ enabled or deprecated (the config is explicit, so nothing enables itself), commi
   prefix) run through the same binary: `make fmt` / `make fmt-check`.
 - Exclusions are few and named: tests may ignore `Close` errors and use fixed file modes;
   `tools/` writes repo files at `0644`/`0755`.
+- `make lint` runs once per `GOOS` in `LINT_OSES` (linux, darwin, windows), whatever the
+  host. golangci-lint loads only the files the build tags select, so a single run would
+  never type-check a `_windows.go` file or a `_darwin_test.go` on a Linux machine or in CI.
 
 ## Dependencies (`depguard`)
 
@@ -69,7 +72,8 @@ To add one:
 
 Stages `check` → `build`; jobs `adr-index`, `format`, `lint`, `test` (coverage scraped
 from `go tool cover -func`), `vuln` (allow_failure: advisory until the agent handles keys)
-and `build` (host binary, `clair version`, then `make build-all` as artifacts). A `vX.Y.Z` tag
+and `build` (host binary, `clair version`, then `make build-all` as artifacts, which ends
+with `tools/machocheck` verifying the darwin builds' code signatures). A `vX.Y.Z` tag
 adds `release`: `make dist` and an upload to the generic package registry (ADR 2026-09.zvs8). Module and
 build caches plus `./bin` are cached on `go.sum` + `Makefile`. Runs on merge requests, the
 default branch and tags.

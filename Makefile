@@ -41,6 +41,11 @@ build: ## Build ./bin/clair for this host
 # catches an OS-specific import before a user on that OS does.
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
+# Nobody runs the darwin builds on a Mac before a release, and Apple silicon kills
+# an arm64 binary whose code signature is missing or stale at exec. Go's linker
+# signs it ad hoc; tools/machocheck verifies every page hash the way the kernel will.
+DARWIN_BUILDS := $(patsubst darwin/%,dist/clair-darwin-%,$(filter darwin/%,$(PLATFORMS)))
+
 .PHONY: build-all
 build-all: ## Cross-compile every supported platform into ./dist
 	@for p in $(PLATFORMS); do \
@@ -48,6 +53,7 @@ build-all: ## Cross-compile every supported platform into ./dist
 		echo "  $$os/$$arch"; \
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build $(GOFLAGS_BUILD) -o dist/clair-$$os-$$arch$$ext ./cmd/clair || exit 1; \
 	done
+	go run ./tools/machocheck $(DARWIN_BUILDS)
 
 # What the tag pipeline uploads (ADR 2026-09.zvs8): every platform, stamped with a
 # release version, and the checksums the installers verify. `make dist VERSION=v0.1.0`
@@ -79,9 +85,17 @@ test: ## Unit tests with the race detector, shuffled, coverage to coverage.out
 cover: test ## Open the coverage report
 	go tool cover -html=coverage.out
 
+# Once per OS the agent ships for, whatever the host: a _darwin.go or _windows.go
+# file, and its tests, is otherwise never type-checked or linted before a user on
+# that OS runs it.
+LINT_OSES := linux darwin windows
+
 .PHONY: lint
-lint: $(BIN)/golangci-lint ## Static analysis (.golangci.yml: vet, staticcheck, gosec, revive, …)
-	$(BIN)/golangci-lint run
+lint: $(BIN)/golangci-lint ## Static analysis (.golangci.yml: vet, staticcheck, gosec, revive, …) for every OS
+	@for os in $(LINT_OSES); do \
+		echo "  GOOS=$$os"; \
+		GOOS=$$os $(BIN)/golangci-lint run || exit 1; \
+	done
 
 .PHONY: fmt
 fmt: $(BIN)/golangci-lint ## Rewrite files with gofumpt + goimports

@@ -12,7 +12,7 @@ fastest:
 | --- | --- |
 | `tidy-check` | `go.mod` / `go.sum` are tidy (`go mod tidy -diff`) |
 | `fmt-check` | gofumpt + goimports would change nothing (`make fmt` fixes) |
-| `lint` | `.golangci.yml` is clean — vet, staticcheck, gosec, revive, gocritic, modernize, depguard … |
+| `lint` | `.golangci.yml` is clean — vet, staticcheck, gosec, revive, gocritic, modernize, depguard … — once per `GOOS` (linux, darwin, windows), so the darwin and Windows files and their tests are type-checked and linted on any host |
 | `test` | `go test -race -shuffle=on -count=1` over every package; coverage in `coverage.out` |
 | `vuln` | `govulncheck`: no known vulnerability reachable from this module (advisory in CI, blocking here) |
 | `adr-check` | `.agents/memory/decisions.md` matches the ADR files |
@@ -26,7 +26,7 @@ linker-injected version.
 | --- | --- |
 | `make tools` | Install the pinned `golangci-lint` and `govulncheck` into `./bin` (once per clone, and after a pin bump) |
 | `make build` | `./bin/clair` for this host — static, `-trimpath`, version from `git describe` |
-| `make build-all` | Cross-compile linux/darwin/windows × amd64/arm64 into `./dist` |
+| `make build-all` | Cross-compile linux/darwin/windows × amd64/arm64 into `./dist`, then `tools/machocheck` verifies the darwin builds' code signatures: Apple silicon kills an arm64 binary whose signature is missing or stale |
 | `make dist VERSION=vX.Y.Z` | `build-all` for a release: checks the stamped version, writes `dist/SHA256SUMS.txt`. The tag pipeline runs it and uploads the result (ADR 2026-09.zvs8) |
 | `make run ARGS="version"` | `go run ./cmd/clair …` |
 | `make fmt` | Rewrite sources with gofumpt + goimports |
@@ -48,6 +48,9 @@ linker-injected version.
 - `go run ./cmd/clair version`, `make run ARGS="daemon -log-level debug"`.
 - `bin/golangci-lint run ./internal/relay/` for one package — but always the `./bin` copy,
   never a `golangci-lint` from `$PATH` (a different version lints differently).
+  `GOOS=windows bin/golangci-lint run` lints one other OS's files.
+- `go run ./tools/machocheck dist/clair-darwin-*` — re-checks the darwin signatures
+  without a rebuild.
 
 ## Cutting a release
 

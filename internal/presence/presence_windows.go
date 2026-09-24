@@ -33,7 +33,7 @@ func host() Sampler {
 func (c console) Sample() Sample {
 	var info lastInputInfo
 	info.size = uint32(unsafe.Sizeof(info))
-	ok, _, _ := c.lastInput.Call(uintptr(unsafe.Pointer(&info)))
+	ok, _, _ := c.lastInput.Call(uintptr(unsafe.Pointer(&info))) //nolint:gosec // GetLastInputInfo fills the struct it is handed a pointer to
 	if ok == 0 || info.tick == 0 {
 		return Sample{}
 	}

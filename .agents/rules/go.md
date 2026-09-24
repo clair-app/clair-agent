@@ -11,11 +11,12 @@ ADR 2026-09.kau2; the design constraints come from `RELAY.md` (see `context/desi
 - Everything else is under `internal/` — this module exposes no importable API, and the
   compiler enforces it. One package per concern, named for what it holds (`relay`,
   `tunnel`, `pairing`), never `util`, `common` or `helpers`.
-- `tools/` holds developer tools; they are `go run`, never shipped. `tools/adr` is
-  stdlib-only; `tools/phonesim` and `tools/relaysim` may import `internal/` and
+- `tools/` holds developer tools; they are `go run`, never shipped. `tools/adr` and
+  `tools/machocheck` are stdlib-only; `tools/phonesim` and `tools/relaysim` may import `internal/` and
   `golang.org/x`, because they *are* the far end of the protocol.
 - OS-specific code goes behind build tags (`_linux.go`, `_darwin.go`, `_windows.go`), and
-  `make build-all` must keep compiling for all six targets in the Makefile.
+  `make build-all` must keep compiling for all six targets in the Makefile. `make lint`
+  lints each OS's files, tests included, from any host.
 
 ## Dependencies
 
