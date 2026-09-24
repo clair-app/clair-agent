@@ -8,7 +8,7 @@ topics: [daemon, cli, install]
 
 # ADR 2026-09.ahq8 — The daemon runs as a per-user login service, never a system service
 
-Status: Accepted (2026-09-23); the macOS and Windows halves await a pass on real hardware
+Status: Accepted (2026-09-23); the macOS half checked on a hosted runner (ADR 2026-09.c93f), the Windows half awaits a pass on real hardware
 
 **What was observed.** Until now `clair daemon` ran in a terminal. RELAY.md §6 has `install.sh`
 set up "binary + user service, then `clair pair`", and §15 left Windows open, favouring "a

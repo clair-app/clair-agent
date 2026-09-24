@@ -29,6 +29,7 @@ an explanation, that explanation belongs in the ADR.
 | `internal/service`, `clair service`, `clair daemon -log-file`, a systemd unit, LaunchAgent plist or task XML, `/clair/ctl/stop`, or the idea of a system service, a Windows service or a daemon run as root | [ADR 2026-09.ahq8](../memory/decisions/2026-09-ahq8-the-daemon-runs-as-a-per-user-login-service.md), then [ADR 2026-09.34qh](../memory/decisions/2026-09-34qh-the-agent-reads-terminal-input-idle-time-itself-and-releases-a-bubbled-decide.md) for why the session matters |
 | `internal/presence`, a held decide's lifetime, `permission_mode`, `X-Clair-Idle-Ms`, or the idea of reading a third hook field | [ADR 2026-09.34qh](../memory/decisions/2026-09-34qh-the-agent-reads-terminal-input-idle-time-itself-and-releases-a-bubbled-decide.md) |
 | the `release` job, `make dist`, a tag, the package registry, or where installers download from | [ADR 2026-09.zvs8](../memory/decisions/2026-09-zvs8-releases-are-tag-pipelines-that-upload-to-the-package-registry.md) |
+| `.github/workflows/`, the GitHub mirror, `tools/machocheck`, or checking anything on macOS | [ADR 2026-09.c93f](../memory/decisions/2026-09-c93f-macos-is-checked-on-github-s-hosted-runners-through-a-push-mirror-of-this.md) |
 
 Add a row when an ADR guards something a future edit is likely to touch; not every ADR
 needs one.
