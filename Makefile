@@ -12,10 +12,12 @@ GOLANGCI_LINT_VERSION := v2.13.2
 GOVULNCHECK_VERSION   := v1.8.0
 
 # Injected into cmd/clair; `clair version` reports them. A plain `go build` still
-# works — main.go falls back to the module's build info.
+# works — main.go falls back to the module's build info. DATE is the commit's time,
+# not the build's, so every input is fixed by the commit and two builds of it hash
+# the same.
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
-DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+DATE    := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
 # The agent is a static binary for a `curl | sh` install (RELAY.md §15): no cgo,

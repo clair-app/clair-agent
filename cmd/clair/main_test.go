@@ -168,9 +168,9 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 func TestBuildVersionFallsBackToDefaults(t *testing.T) {
 	t.Parallel()
 
-	ver, rev := buildVersion()
-	if ver == "" || rev == "" {
-		t.Fatalf("buildVersion() = (%q, %q), want both non-empty", ver, rev)
+	ver, rev, when := buildVersion()
+	if ver == "" || rev == "" || when == "" {
+		t.Fatalf("buildVersion() = (%q, %q, %q), want all non-empty", ver, rev, when)
 	}
 }
 

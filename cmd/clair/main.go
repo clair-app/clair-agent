@@ -36,8 +36,10 @@ import (
 	"claircode.app/clair-agent/internal/state"
 )
 
-// Set by the linker from the Makefile (`-X main.version=…`). The build-info
-// fallback in [buildVersion] covers a plain `go build` / `go install`.
+// Set by the linker from the Makefile (`-X main.version=…`); date is the
+// commit's time, not the build's, so a build is reproducible from its commit.
+// The build-info fallback in [buildVersion] covers a plain `go build` /
+// `go install`.
 var (
 	version = "dev"
 	commit  = "none"
@@ -131,8 +133,8 @@ func runWith(ctx context.Context, d deps, args []string, stdout, stderr io.Write
 	case "hook-event":
 		return cmdHookEvent(ctx, d, args[1:], stderr)
 	case "version":
-		v, c := buildVersion()
-		fmt.Fprintf(stdout, "clair %s (%s, %s)\n", v, c, date)
+		v, c, t := buildVersion()
+		fmt.Fprintf(stdout, "clair %s (%s, %s)\n", v, c, t)
 		return exitOK
 	case "help", "-h", "--help":
 		usage(stdout)
@@ -279,7 +281,7 @@ func cmdDaemon(ctx context.Context, d deps, args []string, stderr io.Writer) int
 		fmt.Fprintf(stderr, "clair daemon: %v\n", err)
 		return exitUsage
 	}
-	v, _ := buildVersion()
+	v, _, _ := buildVersion()
 	installer, err := snippetInstaller(d, agent, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "clair daemon: %v\n", err)
@@ -414,21 +416,22 @@ func readAgent(path string) (state.Agent, bool) {
 // buildVersion prefers the linker-injected values and falls back to what the
 // Go toolchain recorded about the main module and its VCS checkout, so a
 // `go install claircode.app/clair-agent/cmd/clair@vX` still reports vX.
-func buildVersion() (ver, rev string) {
-	ver, rev = version, commit
+func buildVersion() (ver, rev, when string) {
+	ver, rev, when = version, commit, date
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		return ver, rev
+		return ver, rev, when
 	}
 	if ver == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
 		ver = info.Main.Version
 	}
-	if rev == "none" {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" && len(s.Value) >= 7 {
-				rev = s.Value[:7]
-			}
+	for _, s := range info.Settings {
+		switch {
+		case s.Key == "vcs.revision" && rev == "none" && len(s.Value) >= 7:
+			rev = s.Value[:7]
+		case s.Key == "vcs.time" && when == "unknown":
+			when = s.Value
 		}
 	}
-	return ver, rev
+	return ver, rev, when
 }

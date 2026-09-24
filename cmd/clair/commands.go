@@ -114,7 +114,7 @@ func cmdPair(ctx context.Context, d deps, args []string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "clair pair: %v\n", err)
 		return exitError
 	}
-	v, _ := buildVersion()
+	v, _, _ := buildVersion()
 	opts := pairing.Options{
 		Dir:      dir,
 		RelayURL: agent.Relay,
@@ -171,7 +171,7 @@ func cmdUnpair(ctx context.Context, d deps, args []string, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "clair unpair: %v\n", err)
 		return exitError
 	}
-	v, _ := buildVersion()
+	v, _, _ := buildVersion()
 	opts := pairing.Options{
 		Dir: dir,
 		NewRelay: func(baseURL string, auth ed25519.PrivateKey) (pairing.Relay, error) {

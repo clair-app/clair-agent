@@ -16,8 +16,8 @@ binary. `clair service install` (ADR 2026-09.ahq8) leaves putting the binary som
 to an installer, and RELAY.md §15 still listed where releases live as open. The same day
 claircode.app took the installers: `https://claircode.app/install.sh` and `/install.ps1`,
 downloading from `https://claircode.app/releases/` (clair-web ADR 2026-09.e7ky). `make
-build-all` stamps the build time into every binary (`-X main.date`), so two builds of one
-commit never hash the same.
+build-all` stamped the build time into every binary (`-X main.date`), so two builds of one
+commit never hashed the same.
 
 **What changed.**
 
@@ -33,14 +33,17 @@ commit never hash the same.
   shipping.
 - The job builds from the tag instead of reusing the `build` job's artifacts, because those
   are stamped with `git describe`, which a shallow clone may not resolve to the tag.
+- `-X main.date` is the commit's time, not the build's, so a build is fixed by its commit and
+  its Go toolchain: `make dist VERSION=vX.Y.Z` on the tag, with the CI image's Go, reproduces
+  the uploaded bytes.
 
 The alternatives: GitHub or GitLab release assets need a public project or a public mirror;
 a bucket is a second origin for users to trust. Serving from the product's own domain keeps
 one origin in the install command.
 
 **What it costs.** The site needs this project to allow it under Settings → CI/CD → Job token
-permissions, or its deploy can't read the registry. Because of the build-time stamp, a local
-`make dist` never reproduces the uploaded bytes, so the site pins hashes from the registry
-and never from a local build. Replacing a running `clair.exe` on upgrade is the installer's
+permissions, or its deploy can't read the registry. The site still pins hashes from the
+registry and never from a local build: a local Go on another patch release builds different
+bytes, and a reproduction is for checking an upload, not for replacing it. Replacing a running `clair.exe` on upgrade is the installer's
 job (it stops the service and renames the old file first). The `release` job is the gate:
 `make dist` fails a tag whose builds report another version.

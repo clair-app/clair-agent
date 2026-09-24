@@ -15,6 +15,7 @@ What is pinned, where, and how to change it. The reasoning is ADR 2026-09.kau2.
   `go-import` meta tag.
 - Builds are `CGO_ENABLED=0 -trimpath -ldflags '-s -w -X main.version=… -X main.commit=…
   -X main.date=…'` (Makefile): one static binary per platform, no build path in panics.
+  `main.date` is the commit's time, so a commit and a Go version fix the bytes.
   A plain `go build` still works; `cmd/clair` falls back to `debug.ReadBuildInfo()` for
   the version and VCS revision.
 

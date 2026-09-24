@@ -55,8 +55,9 @@ linker-injected version.
 2. The tag pipeline's `release` job uploads the builds and `SHA256SUMS.txt` to
    `packages/generic/clair/vX.Y.Z/`.
 3. In clair-web, `node scripts/agent-release.mjs pin vX.Y.Z` hashes the uploaded files into
-   `agent-release.json`. Never pin from a local `dist/`: the build time is stamped in, so a
-   local build never matches the uploaded bytes.
+   `agent-release.json`. Never pin from a local `dist/`. To check an upload, `make dist
+   VERSION=vX.Y.Z` on the tag with the CI image's Go (`golang:1.26`, newest patch): the
+   stamped date is the commit's, so the checksums match `SHA256SUMS.txt`.
 
 ## Running the whole thing without a phone or a relay
 
