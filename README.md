@@ -15,7 +15,8 @@ Code shows in the terminal only once the hook lets go — is handed to the termi
 someone is typing at one, and held for the watch otherwise (RELAY.md §4.3; the daemon reads
 terminal input idle the way `w` does, no helper, no extra hook). `clair service install` runs the
 daemon as your login service (verified on Linux; the macOS and Windows halves are written and
-tested, not yet run on hardware). Not yet: `install.sh`, releases, and the Android side of the
+tested, not yet run on hardware). A `vX.Y.Z` tag publishes the builds to the package registry,
+and claircode.app's `install.sh` / `install.ps1` serve them (ADR 2026-09.zvs8). Not yet: the Android side of the
 relay.
 
 ```text

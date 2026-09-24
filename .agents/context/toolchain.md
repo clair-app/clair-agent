@@ -9,8 +9,9 @@ What is pinned, where, and how to change it. The reasoning is ADR 2026-09.kau2.
   reason. Bumping the minor is a deliberate edit to both.
 - Module path `claircode.app/clair-agent` — a vanity path under the product's domain
   (the phone app is `app.claircode.clair`), independent of where the repository is
-  hosted. It does not resolve today and does not need to: the install path is the relay's
-  `curl | sh` (RELAY.md §6), not `go install`. If that ever changes, the domain serves a
+  hosted. It does not resolve today and does not need to: the install path is
+  `curl -fsSL https://claircode.app/install.sh | sh` (and `install.ps1` on Windows), not
+  `go install` (ADR 2026-09.zvs8). If that ever changes, the domain serves a
   `go-import` meta tag.
 - Builds are `CGO_ENABLED=0 -trimpath -ldflags '-s -w -X main.version=… -X main.commit=…
   -X main.date=…'` (Makefile): one static binary per platform, no build path in panics.
@@ -67,7 +68,8 @@ To add one:
 
 Stages `check` → `build`; jobs `adr-index`, `format`, `lint`, `test` (coverage scraped
 from `go tool cover -func`), `vuln` (allow_failure: advisory until the agent handles keys)
-and `build` (host binary, `clair version`, then `make build-all` as artifacts). Module and
+and `build` (host binary, `clair version`, then `make build-all` as artifacts). A `vX.Y.Z` tag
+adds `release`: `make dist` and an upload to the generic package registry (ADR 2026-09.zvs8). Module and
 build caches plus `./bin` are cached on `go.sum` + `Makefile`. Runs on merge requests, the
 default branch and tags.
 

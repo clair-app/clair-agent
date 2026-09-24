@@ -27,6 +27,7 @@ linker-injected version.
 | `make tools` | Install the pinned `golangci-lint` and `govulncheck` into `./bin` (once per clone, and after a pin bump) |
 | `make build` | `./bin/clair` for this host — static, `-trimpath`, version from `git describe` |
 | `make build-all` | Cross-compile linux/darwin/windows × amd64/arm64 into `./dist` |
+| `make dist VERSION=vX.Y.Z` | `build-all` for a release: checks the stamped version, writes `dist/SHA256SUMS.txt`. The tag pipeline runs it and uploads the result (ADR 2026-09.zvs8) |
 | `make run ARGS="version"` | `go run ./cmd/clair …` |
 | `make fmt` | Rewrite sources with gofumpt + goimports |
 | `make tidy` | `go mod tidy` |
@@ -47,6 +48,15 @@ linker-injected version.
 - `go run ./cmd/clair version`, `make run ARGS="daemon -log-level debug"`.
 - `bin/golangci-lint run ./internal/relay/` for one package — but always the `./bin` copy,
   never a `golangci-lint` from `$PATH` (a different version lints differently).
+
+## Cutting a release
+
+1. `make check` on the commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
+2. The tag pipeline's `release` job uploads the builds and `SHA256SUMS.txt` to
+   `packages/generic/clair/vX.Y.Z/`.
+3. In clair-web, `node scripts/agent-release.mjs pin vX.Y.Z` hashes the uploaded files into
+   `agent-release.json`. Never pin from a local `dist/`: the build time is stamped in, so a
+   local build never matches the uploaded bytes.
 
 ## Running the whole thing without a phone or a relay
 

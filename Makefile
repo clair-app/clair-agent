@@ -47,6 +47,19 @@ build-all: ## Cross-compile every supported platform into ./dist
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build $(GOFLAGS_BUILD) -o dist/clair-$$os-$$arch$$ext ./cmd/clair || exit 1; \
 	done
 
+# What the tag pipeline uploads (ADR 2026-09.zvs8): every platform, stamped with a
+# release version, and the checksums the installers verify. `make dist VERSION=v0.1.0`
+# reproduces it; it refuses a version that is not a release tag.
+.PHONY: dist
+dist: build-all ## build-all for a release: check the stamped version, write dist/SHA256SUMS.txt
+	@echo "$(VERSION)" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$$' || \
+		{ echo "dist: VERSION=$(VERSION) is not a vX.Y.Z release tag" >&2; exit 1; }
+	@host=dist/clair-$$(go env GOOS)-$$(go env GOARCH)$$( [ "$$(go env GOOS)" = windows ] && echo .exe); \
+		$$host version | grep -q "^clair $(VERSION) " || \
+		{ echo "dist: $$host reports '$$($$host version)', not $(VERSION)" >&2; exit 1; }
+	cd dist && rm -f SHA256SUMS.txt && sha256sum clair-* > SHA256SUMS.txt
+	@cat dist/SHA256SUMS.txt
+
 .PHONY: run
 run: ## Run the agent from source: make run ARGS="version"
 	go run ./cmd/clair $(ARGS)

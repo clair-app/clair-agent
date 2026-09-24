@@ -28,6 +28,7 @@ an explanation, that explanation belongs in the ADR.
 | `clair unpair`, `releaseAll`, `ReleasePair`, `TakePair`, or sending a sealed `revoke` from the host | [ADR 2026-09.69ym](../memory/decisions/2026-09-69ym-ending-a-pair-is-a-sealed-revoke.md) |
 | `internal/service`, `clair service`, `clair daemon -log-file`, a systemd unit, LaunchAgent plist or task XML, `/clair/ctl/stop`, or the idea of a system service, a Windows service or a daemon run as root | [ADR 2026-09.ahq8](../memory/decisions/2026-09-ahq8-the-daemon-runs-as-a-per-user-login-service.md), then [ADR 2026-09.34qh](../memory/decisions/2026-09-34qh-the-agent-reads-terminal-input-idle-time-itself-and-releases-a-bubbled-decide.md) for why the session matters |
 | `internal/presence`, a held decide's lifetime, `permission_mode`, `X-Clair-Idle-Ms`, or the idea of reading a third hook field | [ADR 2026-09.34qh](../memory/decisions/2026-09-34qh-the-agent-reads-terminal-input-idle-time-itself-and-releases-a-bubbled-decide.md) |
+| the `release` job, `make dist`, a tag, the package registry, or where installers download from | [ADR 2026-09.zvs8](../memory/decisions/2026-09-zvs8-releases-are-tag-pipelines-that-upload-to-the-package-registry.md) |
 
 Add a row when an ADR guards something a future edit is likely to touch; not every ADR
 needs one.

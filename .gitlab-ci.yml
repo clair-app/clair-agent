@@ -1,6 +1,6 @@
 # Clair agent CI. Every job is a `make` target, so a red job reproduces locally with
 # the same command and the same pinned tool versions (see the Makefile).
-stages: [check, build]
+stages: [check, build, release]
 
 workflow:
   rules:
@@ -85,3 +85,30 @@ build:
   artifacts:
     paths: [dist/]
     expire_in: 2 weeks
+
+# A release tag (vX.Y.Z) publishes the six builds and their SHA256SUMS.txt to this
+# project's generic package registry, as packages/generic/clair/<tag>/<file>. claircode.app
+# serves them to its installers once its agent-release.json pins their hashes
+# (ADR 2026-09.zvs8); nothing reaches a user from here alone. Built here rather than taken
+# from `build`'s artifacts so the version stamped in is the tag, which `make dist` checks.
+# The registry keeps a re-uploaded file beside the old one; the site's pin catches a change.
+release:
+  extends: .go
+  stage: release
+  interruptible: false
+  before_script: []
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/
+  script:
+    - make dist VERSION="$CI_COMMIT_TAG"
+    - |
+      base="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/clair/$CI_COMMIT_TAG"
+      for f in dist/clair-* dist/SHA256SUMS.txt; do
+        echo "  $base/${f#dist/}"
+        curl --fail-with-body --silent --show-error --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+          --upload-file "$f" "$base/${f#dist/}"
+        echo
+      done
+  artifacts:
+    paths: [dist/]
+    expire_in: 1 week
