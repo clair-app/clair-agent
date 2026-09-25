@@ -163,17 +163,19 @@ windows:
       go version
   script:
     - go test -shuffle=on -count=1 ./...
+    # The runner is a machine people use too, so the job's daemon and release server take
+    # ports nothing else here does (a real agent listens on 7317).
     - |
       $ErrorActionPreference = 'Stop'
       function Check($ok, $what) { if (-not $ok) { throw "failed: $what" } else { Write-Host "ok: $what" } }
       function Clair { $o = & $clair @args 2>&1 | Out-String; $code = $LASTEXITCODE; Write-Host "> clair $args (exit $code)`n$o"; [pscustomobject]@{ Code = $code; Out = $o } }
       function Latest($v) { [IO.File]::WriteAllText("$rel\latest.txt", "$v`n") }
       function Asides { @(Get-ChildItem $dest -Filter '.clair-old-*.exe' -Force) }
-      function Start-Daemon { Start-Process -FilePath $clair -ArgumentList 'daemon', '-listen', '127.0.0.1:7417', '-log-file', "$work\daemon.log" -PassThru -NoNewWindow }
+      function Start-Daemon { Start-Process -FilePath $clair -ArgumentList 'daemon', '-listen', '127.0.0.1:17417', '-log-file', "$work\daemon.log" -PassThru -NoNewWindow }
       function Wait-Answering { foreach ($i in 1..80) { & $clair status *> $null; if ($LASTEXITCODE -eq 0) { return }; Start-Sleep -Milliseconds 250 }; throw 'the daemon never answered' }
 
       $work = Join-Path $env:CI_PROJECT_DIR 'self-update'
-      $rel = "$work\releases"; $dest = "$work\bin"; $src = 'http://127.0.0.1:8001'
+      $rel = "$work\releases"; $dest = "$work\bin"; $src = 'http://127.0.0.1:18001'
       New-Item -ItemType Directory -Force $rel, $dest | Out-Null
       $env:CLAIR_CONFIG_DIR = "$work\config"; $env:CLAUDE_CONFIG_DIR = "$work\claude"
       go build -o "$work\releasesign.exe" ./tools/releasesign
@@ -192,7 +194,7 @@ windows:
       }
       [IO.File]::AppendAllText("$rel\v0.0.4\clair-v0.0.4-windows-amd64.exe", 'x')  # no longer the signed bytes
       Latest 'v0.0.1'
-      $server = Start-Process -FilePath "$work\releasesign.exe" -ArgumentList 'serve', '-listen', '127.0.0.1:8001', $rel -PassThru -NoNewWindow
+      $server = Start-Process -FilePath "$work\releasesign.exe" -ArgumentList 'serve', '-listen', '127.0.0.1:18001', $rel -PassThru -NoNewWindow
       foreach ($i in 1..40) { curl.exe -fsS "$src/latest.txt" *> $null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep -Milliseconds 250 }
 
       Copy-Item "$rel\v0.0.1\clair-v0.0.1-windows-amd64.exe" "$dest\clair.exe"
@@ -234,21 +236,21 @@ windows:
 
       # A clean stop through the control surface, then the next start runs v0.0.3 and sweeps.
       $admin = (Get-Content "$env:CLAIR_CONFIG_DIR\agent.json" -Raw | ConvertFrom-Json).adminToken
-      curl.exe -fsS -X POST -H "Authorization: Bearer $admin" http://127.0.0.1:7417/clair/ctl/stop
+      curl.exe -fsS -X POST -H "Authorization: Bearer $admin" http://127.0.0.1:17417/clair/ctl/stop
       Check ($daemon.WaitForExit(15000)) 'the daemon stopped'
       $daemon = Start-Daemon
       Wait-Answering
       $st = (Clair status -json).Out | ConvertFrom-Json
       Check ($st.version -eq 'v0.0.3') 'after the restart the daemon runs v0.0.3'
       Check ((Asides).Count -eq 0) 'the sweep removed the aside copy'
-      curl.exe -fsS -X POST -H "Authorization: Bearer $admin" http://127.0.0.1:7417/clair/ctl/stop
+      curl.exe -fsS -X POST -H "Authorization: Bearer $admin" http://127.0.0.1:17417/clair/ctl/stop
       $daemon.WaitForExit(15000) | Out-Null
 
       # The scheduled task's shape (ADR 2026-09.pz5g): conhost --headless running
       # `clair daemon -supervise`. A killed daemon comes back, on the release the self-update
       # staged; a clean stop ends the supervisor and conhost with exit 0.
-      function Child { Get-CimInstance Win32_Process -Filter "Name='clair.exe'" | Where-Object CommandLine -match '-listen=127\.0\.0\.1:7417' }
-      $sup = Start-Process -FilePath "$env:SystemRoot\System32\conhost.exe" -ArgumentList '--headless', "`"$clair`"", 'daemon', '-supervise', '-listen', '127.0.0.1:7417', '-log-file', "`"$work\supervised.log`"" -PassThru
+      function Child { Get-CimInstance Win32_Process -Filter "Name='clair.exe'" | Where-Object CommandLine -match '-listen=127\.0\.0\.1:17417' }
+      $sup = Start-Process -FilePath "$env:SystemRoot\System32\conhost.exe" -ArgumentList '--headless', "`"$clair`"", 'daemon', '-supervise', '-listen', '127.0.0.1:17417', '-log-file', "`"$work\supervised.log`"" -PassThru
       Wait-Answering
       $first = (Child).ProcessId
       Check ($first) 'the supervisor started the daemon'
@@ -260,7 +262,7 @@ windows:
       Wait-Answering
       $st = (Clair status -json).Out | ConvertFrom-Json
       Check ($st.version -eq 'v0.0.6') 'the killed daemon came back, on the staged release'
-      curl.exe -fsS -X POST -H "Authorization: Bearer $admin" http://127.0.0.1:7417/clair/ctl/stop
+      curl.exe -fsS -X POST -H "Authorization: Bearer $admin" http://127.0.0.1:17417/clair/ctl/stop
       Check ($sup.WaitForExit(20000)) 'a clean stop ended the supervisor and conhost'
       Check ($sup.ExitCode -eq 0) 'conhost exited 0'
       Check (-not (Child)) 'no daemon is left'
