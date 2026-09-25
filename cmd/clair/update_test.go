@@ -68,13 +68,20 @@ func updateDeps(env map[string]string, exe string) deps {
 	return d
 }
 
+// installFake writes a fake build and returns its resolved path, the one the
+// updater reports: on macOS the temporary directory is under /var, a link
+// to /private/var.
 func installFake(t *testing.T, version string) string {
 	t.Helper()
 	exe := filepath.Join(t.TempDir(), "clair")
 	if err := os.WriteFile(exe, fakeBuild(version), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return exe
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 // closedPort is a loopback address nothing listens on.
