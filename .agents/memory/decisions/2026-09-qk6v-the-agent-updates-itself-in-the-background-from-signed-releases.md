@@ -8,7 +8,7 @@ topics: [install, release, daemon, security]
 
 # ADR 2026-09.qk6v — The agent updates itself in the background from signed releases, and the new binary runs at the next restart
 
-Status: Accepted (2026-09-24)
+Status: Accepted (2026-09-24); the swap checked for real on macOS (ADR 2026-09.c93f) and on Windows 11 with Defender on (ADR 2026-09.6w38)
 
 **What was observed.** Upgrading meant re-running `install.sh` or `install.ps1`, which swap the
 binary and restart the service (clair-web ADR 2026-09.e7ky). Nobody re-runs an installer, so every
@@ -125,8 +125,9 @@ The alternatives:
   A leaked key together with a compromised site reaches every host within about six hours; the
   backup key is for rotating it.
 - **Unverified on hardware:**
-  - Windows: renaming a running `clair.exe` under Defender, and the moment between the two
-    renames, when the path is empty and a hook started then fails once.
+  - Windows: the moment between the two renames, when the path is empty and a hook started
+    then fails once. Renaming a running `clair.exe` aside under Defender, a second update
+    before the restart, and the sweep are checked by the `windows` job (ADR 2026-09.6w38).
   - macOS: whether a new binary raises "Background Items Added" again. The macOS job records
     `sfltool dumpbtm` before and after.
   - The swap sequence is tested against a fake Windows filesystem (`swap_test.go`), and the real

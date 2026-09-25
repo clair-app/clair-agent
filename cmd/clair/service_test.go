@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -78,6 +79,9 @@ func TestServiceInstallPrint(t *testing.T) {
 	} {
 		t.Run(goos, func(t *testing.T) {
 			t.Parallel()
+			if goos == "linux" && runtime.GOOS == "windows" {
+				t.Skip("a unit escapes this host's backslashed temp paths; internal/service's goldens cover the rendering")
+			}
 			d := serviceDeps(t, goos, nil)
 			d.getenv = func(k string) string { return map[string]string{"HTTPS_PROXY": "http://proxy:3128"}[k] }
 			dir := filepath.Join(t.TempDir(), "clair")

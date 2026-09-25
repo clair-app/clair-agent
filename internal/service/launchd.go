@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -23,22 +23,24 @@ type launchd struct {
 	logDir string
 }
 
+// newLaunchd builds the manager. A LaunchAgent's paths are POSIX paths, joined
+// with path rather than filepath so the plist renders the same on any host.
 func newLaunchd(env Env) *launchd {
 	return &launchd{
 		env:    env,
-		path:   filepath.Join(env.Home, "Library", "LaunchAgents", Label+".plist"),
-		logDir: filepath.Join(env.Home, "Library", "Logs", "clair"),
+		path:   path.Join(env.Home, "Library", "LaunchAgents", Label+".plist"),
+		logDir: path.Join(env.Home, "Library", "Logs", "clair"),
 	}
 }
 
 func (*launchd) Kind() string      { return "launchd agent" }
 func (l *launchd) Path() string    { return l.path }
-func (l *launchd) LogFile() string { return filepath.Join(l.logDir, "daemon.log") }
+func (l *launchd) LogFile() string { return path.Join(l.logDir, "daemon.log") }
 func (l *launchd) Logs() string    { return l.LogFile() }
 
 // stderrLog catches what the daemon's own log cannot: a panic, or a failure
 // before the log file opened.
-func (l *launchd) stderrLog() string { return filepath.Join(l.logDir, "daemon.stderr.log") }
+func (l *launchd) stderrLog() string { return path.Join(l.logDir, "daemon.stderr.log") }
 
 func (l *launchd) domain() string { return "gui/" + strconv.Itoa(l.env.UID) }
 func (l *launchd) target() string { return l.domain() + "/" + Label }

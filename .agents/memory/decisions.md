@@ -20,6 +20,7 @@ number" and all take it — so nobody picks one. Cite the id an ADR carries; nev
 | [2026-09.3gre](decisions/2026-09-3gre-a-phone-snippet-may-only-shape-the-agent-s-own-http-hooks.md) | A phone snippet may only shape the agent's own http hooks | hooks, security |
 | [2026-09.66m4](decisions/2026-09-66m4-the-cli-on-disk-may-be-newer-than-the-running-daemon.md) | The CLI on disk may be newer than the running daemon, so what they share only grows | daemon, cli, state |
 | [2026-09.69ym](decisions/2026-09-69ym-ending-a-pair-is-a-sealed-revoke.md) | Ending a pair is a sealed revoke, then DELETE; the CLI seals it from the pair file the daemon hands over | protocol, state, cli |
+| [2026-09.6w38](decisions/2026-09-6w38-windows-is-checked-on-the-instance-runner-tagged-windows.md) | Windows is checked on the instance runner tagged windows, as SYSTEM in session 0 | ci, windows, daemon, install |
 | [2026-09.9ufb](decisions/2026-09-9ufb-a-relay-reported-revoke-parks-a-pair.md) | A relay-reported revoke parks a pair; only the phone's sealed revoke or a week of unbroken reports deletes it | relay, state, security |
 | [2026-09.ahq8](decisions/2026-09-ahq8-the-daemon-runs-as-a-per-user-login-service.md) | The daemon runs as a per-user login service, never a system service | daemon, cli, install |
 | [2026-09.bckr](decisions/2026-09-bckr-a-phone-snippet-is-filled-in-as-json.md) | A phone snippet is filled in as JSON, matched on the agent's port, trimmed to known events, and replaced by the built-in block at pairing | hooks, security, pairing |

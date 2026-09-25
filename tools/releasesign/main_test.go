@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestKeygenSignVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("keygen printed %q: %v", out.String(), err)
 	}
-	if info, statErr := os.Stat(keyPath); statErr != nil || info.Mode().Perm() != 0o600 {
+	if info, statErr := os.Stat(keyPath); statErr != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Errorf("key file mode = %v, %v; want 0600", info.Mode(), statErr)
 	}
 	if code := run([]string{"keygen", "-out", keyPath}, &out, &errOut); code != 1 {
@@ -64,6 +65,15 @@ func TestBuiltin(t *testing.T) {
 	}
 	if lines := strings.Count(out.String(), "\n"); lines != len(keys) {
 		t.Errorf("builtin printed %d keys, want %d", lines, len(keys))
+	}
+}
+
+func TestServeRefusesBeyondLoopback(t *testing.T) {
+	t.Parallel()
+
+	var out, errOut bytes.Buffer
+	if code := run([]string{"serve", "-listen", "0.0.0.0:0", t.TempDir()}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "loopback") {
+		t.Errorf("serve on 0.0.0.0 = %d %q, want 1 and a loopback refusal", code, errOut.String())
 	}
 }
 

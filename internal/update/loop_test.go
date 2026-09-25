@@ -20,7 +20,7 @@ func (zeros) Read(p []byte) (int, error) {
 
 func loopUpdater(t *testing.T, now func() time.Time, enabled func() bool) *Updater {
 	t.Helper()
-	u, err := New(Options{Current: "v0.1.0", Exe: "/opt/clair/clair", Entropy: zeros{}, Now: now, Enabled: enabled})
+	u, err := New(Options{Current: "v0.1.0", Exe: someExe(), Entropy: zeros{}, Now: now, Enabled: enabled})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

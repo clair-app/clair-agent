@@ -11,6 +11,10 @@
 # router matches the files it describes, and CI runs it.
 .agents/memory/decisions.md merge=union
 
+# Golden files are compared byte for byte, so they are never converted: Git for Windows
+# would otherwise check them out with CRLF and every golden test there would fail.
+**/testdata/** -text
+
 # Go sources are LF everywhere; gofmt would rewrite CRLF anyway.
 *.go text eol=lf
 go.mod text eol=lf

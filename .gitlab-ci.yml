@@ -112,3 +112,141 @@ release:
   artifacts:
     paths: [dist/]
     expire_in: 1 week
+
+
+# Windows, on the instance runner tagged `windows`: a Windows 11 machine, shell executor, pwsh,
+# running as SYSTEM in session 0. It has git, curl and tar but no Go, so the job fetches the
+# Go 1.26 that go.dev names (its published SHA-256 checked) into the runner's own directory,
+# where it survives `git clean` between jobs. Without a C compiler there is no race detector,
+# so the tests run with -shuffle only; Linux's `test` job is the race gate.
+#
+# Then the self-update for real (ADR 2026-09.qk6v): a running clair.exe is renamed aside and
+# replaced, a second update lands before the restart while the first aside copy is still the
+# running image, a tampered or foreign-key release is refused, and after a restart the new
+# binary runs and the sweep removes the aside copy. Session 0 has no desktop, so the Scheduled
+# Task and presence halves of ADR 2026-09.ahq8 still wait for a signed-in user.
+windows:
+  stage: check
+  tags: [windows]
+  interruptible: true
+  timeout: 30m
+  variables:
+    # A fresh clone: files a fetch leaves in place keep the line endings of an older
+    # checkout, and the golden tests compare bytes.
+    GIT_STRATEGY: clone
+  rules:
+    - changes: [cmd/**/*, internal/**/*, tools/**/*, go.mod, go.sum, .gitlab-ci.yml]
+  before_script:
+    - |
+      $ErrorActionPreference = 'Stop'
+      $tools = Join-Path $env:CI_BUILDS_DIR '.clair-tools'
+      # The parentheses matter: Invoke-RestMethod hands a JSON array on as one object.
+      $go = (Invoke-RestMethod 'https://go.dev/dl/?mode=json') | Where-Object { $_.stable -and $_.version -like 'go1.26.*' } | Select-Object -First 1
+      if (-not $go) { throw 'go.dev lists no stable Go 1.26' }
+      $root = Join-Path $tools $go.version
+      if (-not (Test-Path "$root\go\bin\go.exe")) {
+        $file = @($go.files | Where-Object { $_.os -eq 'windows' -and $_.arch -eq 'amd64' -and $_.kind -eq 'archive' })
+        if ($file.Count -ne 1) { throw "go.dev lists $($file.Count) windows-amd64 archives of $($go.version)" }
+        $file = $file[0]
+        New-Item -ItemType Directory -Force $root | Out-Null
+        $zip = Join-Path $tools $file.filename
+        Invoke-WebRequest "https://go.dev/dl/$($file.filename)" -OutFile $zip
+        if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne $file.sha256) { throw "$($file.filename) does not match go.dev's SHA-256" }
+        tar -xf $zip -C $root
+        if ($LASTEXITCODE) { throw "unpacking $($file.filename) failed" }
+        Remove-Item $zip
+      }
+      $env:PATH = "$root\go\bin;$env:PATH"
+      $env:GOMODCACHE = Join-Path $tools 'gomod'
+      $env:GOCACHE = Join-Path $tools 'gocache'
+      $env:CGO_ENABLED = '0'
+      go version
+  script:
+    - go test -shuffle=on -count=1 ./...
+    - |
+      $ErrorActionPreference = 'Stop'
+      function Check($ok, $what) { if (-not $ok) { throw "failed: $what" } else { Write-Host "ok: $what" } }
+      function Clair { $o = & $clair @args 2>&1 | Out-String; $code = $LASTEXITCODE; Write-Host "> clair $args (exit $code)`n$o"; [pscustomobject]@{ Code = $code; Out = $o } }
+      function Latest($v) { [IO.File]::WriteAllText("$rel\latest.txt", "$v`n") }
+      function Asides { @(Get-ChildItem $dest -Filter '.clair-old-*.exe' -Force) }
+      function Start-Daemon { Start-Process -FilePath $clair -ArgumentList 'daemon', '-listen', '127.0.0.1:7417', '-log-file', "$work\daemon.log" -PassThru -NoNewWindow }
+      function Wait-Answering { foreach ($i in 1..80) { & $clair status *> $null; if ($LASTEXITCODE -eq 0) { return }; Start-Sleep -Milliseconds 250 }; throw 'the daemon never answered' }
+
+      $work = Join-Path $env:CI_PROJECT_DIR 'self-update'
+      $rel = "$work\releases"; $dest = "$work\bin"; $src = 'http://127.0.0.1:8001'
+      New-Item -ItemType Directory -Force $rel, $dest | Out-Null
+      $env:CLAIR_CONFIG_DIR = "$work\config"; $env:CLAUDE_CONFIG_DIR = "$work\claude"
+      go build -o "$work\releasesign.exe" ./tools/releasesign
+      $pub = (& "$work\releasesign.exe" keygen -out "$work\test.pem" | Out-String).Trim()
+      & "$work\releasesign.exe" keygen -out "$work\foreign.pem" | Out-Null
+      foreach ($v in 'v0.0.1', 'v0.0.2', 'v0.0.3', 'v0.0.4', 'v0.0.5') {
+        $dir = "$rel\$v"; $name = "clair-$v-windows-amd64.exe"
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        go build -trimpath -ldflags "-s -w -X main.version=$v -X main.releaseTestKey=$pub" -o "$dir\$name" ./cmd/clair
+        if ($LASTEXITCODE) { throw "build $v" }
+        $sum = (Get-FileHash "$dir\$name" -Algorithm SHA256).Hash.ToLower()
+        [IO.File]::WriteAllText("$dir\SHA256SUMS.txt", "$sum  $name`n")
+        $signer = if ($v -eq 'v0.0.5') { "$work\foreign.pem" } else { "$work\test.pem" }
+        & "$work\releasesign.exe" sign -key $signer $dir
+        if ($LASTEXITCODE) { throw "sign $v" }
+      }
+      [IO.File]::AppendAllText("$rel\v0.0.4\clair-v0.0.4-windows-amd64.exe", 'x')  # no longer the signed bytes
+      Latest 'v0.0.1'
+      $server = Start-Process -FilePath "$work\releasesign.exe" -ArgumentList 'serve', '-listen', '127.0.0.1:8001', $rel -PassThru -NoNewWindow
+      foreach ($i in 1..40) { curl.exe -fsS "$src/latest.txt" *> $null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep -Milliseconds 250 }
+
+      Copy-Item "$rel\v0.0.1\clair-v0.0.1-windows-amd64.exe" "$dest\clair.exe"
+      $clair = "$dest\clair.exe"
+      $daemon = Start-Daemon
+      Wait-Answering
+      try { Write-Host ("Defender real-time protection: " + (Get-MpComputerStatus).RealTimeProtectionEnabled) } catch { Write-Host "Defender status unavailable: $_" }
+
+      $r = Clair update -check -releases $src
+      Check ($r.Code -eq 0 -and $r.Out -match 'clair v0\.0\.1 is the latest release') 'v0.0.1 is the latest'
+
+      Latest 'v0.0.2'
+      $r = Clair update -releases $src
+      Check ($r.Code -eq 0 -and $r.Out -match 'Installed clair v0\.0\.2') 'the running daemon staged v0.0.2'
+      Check ((Clair version).Out -match '^clair v0\.0\.2 ') 'clair.exe is now v0.0.2'
+      Check (-not $daemon.HasExited) 'the daemon kept running'
+      Check ((Asides).Count -eq 1) 'the running v0.0.1 was renamed aside'
+      Write-Host ('daemon image: ' + (Get-Process -Id $daemon.Id).Path)
+      Check ((Clair status).Out -match 'updates: clair v0\.0\.2 is installed') 'status says v0.0.2 waits for a restart'
+
+      # A second update before the restart: v0.0.1 still runs from its aside copy.
+      Latest 'v0.0.3'
+      $r = Clair update -releases $src
+      Check ($r.Code -eq 0 -and $r.Out -match 'Installed clair v0\.0\.3') 'a second update staged v0.0.3'
+      Check ((Clair version).Out -match '^clair v0\.0\.3 ') 'clair.exe is now v0.0.3'
+      # v0.0.1 runs the daemon; v0.0.2 was the `clair update` that asked, running as it was
+      # moved aside, so Windows keeps it too until the sweep at the next start.
+      Check ((Asides).Count -eq 2) 'both running images are left aside'
+      Check (-not $daemon.HasExited) 'the daemon still runs'
+
+      Latest 'v0.0.4'
+      $r = Clair update -releases $src
+      Check ($r.Code -ne 0 -and $r.Out -match 'not the signed') 'a tampered build is refused'
+      Latest 'v0.0.5'
+      $r = Clair update -releases $src
+      Check ($r.Code -ne 0 -and $r.Out -match 'bad release signature') 'a foreign key is refused'
+      Check ((Clair version).Out -match '^clair v0\.0\.3 ') 'clair.exe is still v0.0.3'
+      Check ((Get-ChildItem $dest -Filter '.clair-update-*' -Force).Count -eq 0) 'no download is left behind'
+
+      # A clean stop through the control surface, then the next start runs v0.0.3 and sweeps.
+      $admin = (Get-Content "$env:CLAIR_CONFIG_DIR\agent.json" -Raw | ConvertFrom-Json).adminToken
+      curl.exe -fsS -X POST -H "Authorization: Bearer $admin" http://127.0.0.1:7417/clair/ctl/stop
+      Check ($daemon.WaitForExit(15000)) 'the daemon stopped'
+      $daemon = Start-Daemon
+      Wait-Answering
+      $st = (Clair status -json).Out | ConvertFrom-Json
+      Check ($st.version -eq 'v0.0.3') 'after the restart the daemon runs v0.0.3'
+      Check ((Asides).Count -eq 0) 'the sweep removed the aside copy'
+      curl.exe -fsS -X POST -H "Authorization: Bearer $admin" http://127.0.0.1:7417/clair/ctl/stop
+      $daemon.WaitForExit(15000) | Out-Null
+      Stop-Process -Id $server.Id -Force
+  after_script:
+    # A process left running would hold files the next job's `git clean` must delete.
+    - |
+      $root = (Resolve-Path $env:CI_PROJECT_DIR).Path
+      Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue
+      Get-Content "$root\self-update\daemon.log" -ErrorAction SilentlyContinue | Select-Object -Last 40

@@ -5,6 +5,7 @@
 //	go run ./tools/releasesign pubkey -key k.pem    # the public half again
 //	go run ./tools/releasesign sign -key k.pem DIR  # DIR/SHA256SUMS.txt → DIR/SHA256SUMS.txt.sig
 //	go run ./tools/releasesign builtin              # the release keys built into the agent
+//	go run ./tools/releasesign serve DIR            # serve a local release on 127.0.0.1:8001
 //
 // A build trusts a test key only when the linker put it there (`make build
 // RELEASE_TEST_KEY=<public key>`), which `clair version` then says and `make
@@ -14,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -23,8 +25,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"time"
 
 	"claircode.app/clair-agent/internal/update"
 )
@@ -34,6 +40,7 @@ const usageText = `usage:
   releasesign pubkey -key FILE     print a key's public half
   releasesign sign -key FILE DIR   sign DIR/SHA256SUMS.txt into DIR/SHA256SUMS.txt.sig
   releasesign builtin              print the agent's built-in release keys; fail under two
+  releasesign serve [-listen ADDR] DIR   serve DIR over HTTP on loopback (default 127.0.0.1:8001)
 `
 
 // minBuiltinKeys is a primary and a backup. A release with fewer could
@@ -55,6 +62,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	out := fs.String("out", "", "where keygen writes the key")
 	keyFile := fs.String("key", "", "the key to read")
+	listen := fs.String("listen", "127.0.0.1:8001", "where serve listens; loopback only")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -68,6 +76,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = sign(*keyFile, fs.Arg(0), stdout)
 	case args[0] == "builtin" && fs.NArg() == 0:
 		err = builtin(stdout)
+	case args[0] == "serve" && fs.NArg() == 1:
+		err = serve(*listen, fs.Arg(0), stdout)
 	default:
 		fmt.Fprint(stderr, usageText)
 		return 2
@@ -159,6 +169,36 @@ func builtin(stdout io.Writer) error {
 	}
 	if len(keys) < minBuiltinKeys {
 		return fmt.Errorf("%d release keys are built in (internal/update/keys.go), fewer than %d", len(keys), minBuiltinKeys)
+	}
+	return nil
+}
+
+// serve is a release server for trying the self-update where there is no
+// Python to run one (the Windows CI job): the files in dir, on loopback, until
+// interrupted. The agent reads plain HTTP from loopback only.
+func serve(listen, dir string, stdout io.Writer) error {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return err
+	}
+	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return fmt.Errorf("-listen %s: serve only on loopback", listen)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", listen)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: http.FileServer(http.Dir(dir)), ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	fmt.Fprintf(stdout, "serving %s on http://%s\n", dir, ln.Addr())
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
 	return nil
 }

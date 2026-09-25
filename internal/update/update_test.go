@@ -378,7 +378,7 @@ func TestNew(t *testing.T) {
 	t.Parallel()
 
 	for _, v := range []string{"dev", "v0.1.0-3-gabc1234", "v0.1.0-dirty", "v0.2.0-rc.1", ""} {
-		if _, err := New(Options{Current: v, Exe: "/opt/clair/clair", Entropy: rand.Reader}); !errors.Is(err, ErrNotRelease) {
+		if _, err := New(Options{Current: v, Exe: someExe(), Entropy: rand.Reader}); !errors.Is(err, ErrNotRelease) {
 			t.Errorf("New(Current %q) = %v, want ErrNotRelease", v, err)
 		}
 	}
@@ -415,4 +415,12 @@ func TestSweep(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("after Sweep: %v, want %v", got, want)
 	}
+}
+
+// someExe is an absolute path on this OS; nothing reads it.
+func someExe() string {
+	if runtime.GOOS == "windows" {
+		return `C:\clair\clair.exe`
+	}
+	return "/opt/clair/clair"
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -190,7 +191,8 @@ func TestLaunchd(t *testing.T) {
 			t.Fatalf("Install = %v, %v; want changed", changed, err)
 		}
 		checkCalls(t, r, domain, target)
-		if info, err := os.Stat(filepath.Dir(m.LogFile())); err != nil || info.Mode().Perm() != 0o700 {
+		// Windows has no mode bits to check; the profile's ACL guards it.
+		if info, err := os.Stat(filepath.Dir(m.LogFile())); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o700) {
 			t.Errorf("log directory: %v, %v; want it made 0700", info, err)
 		}
 		if err := m.Start(ctx); err != nil {

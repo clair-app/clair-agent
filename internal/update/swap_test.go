@@ -2,9 +2,9 @@ package update
 
 import (
 	"errors"
-	"fmt"
 	"io/fs"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -131,14 +131,14 @@ func TestRenameAsideStopsOnHardErrors(t *testing.T) {
 func TestAsideName(t *testing.T) {
 	t.Parallel()
 
-	a, err := asideName("/opt/clair/clair.exe", strings.NewReader("0123456789abcdef"))
+	a, err := asideName(someExe(), strings.NewReader("0123456789abcdef"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := fmt.Sprintf("/opt/clair/%s3031323334353637.exe", asidePrefix); a != want {
+	if want := filepath.Join(filepath.Dir(someExe()), asidePrefix+"3031323334353637.exe"); a != want {
 		t.Errorf("asideName = %q, want %q", a, want)
 	}
-	if _, err := asideName("/opt/clair/clair.exe", strings.NewReader("")); err == nil {
+	if _, err := asideName(someExe(), strings.NewReader("")); err == nil {
 		t.Error("asideName without entropy succeeded")
 	}
 }

@@ -83,6 +83,15 @@ GitLab has no macOS runner, so `.github/workflows/macos.yml` runs on
 over SSH with a deploy key). It runs `make test` on darwin, the LaunchAgent for real, and
 claircode.app's `install.sh`. Push to GitLab, never to the mirror; results show on GitHub only.
 
+The `windows` job runs on the instance runner tagged `windows`: Windows 11, the shell executor,
+pwsh, as SYSTEM in session 0 (ADR 2026-09.6w38).
+
+- It fetches go.dev's Go 1.26 (SHA-256 checked) into `$CI_BUILDS_DIR\.clair-tools`.
+- It runs `go test -shuffle=on ./...`; there is no race detector without a C compiler.
+- It swaps a running `clair.exe` through the self-update for real.
+
+Session 0 has no desktop, so the Scheduled Task and presence stay unverified.
+
 ## Git hooks (`.githooks/`)
 
 Opt in with `make hooks`. `pre-commit` extracts the *staged* ADR files and router to a

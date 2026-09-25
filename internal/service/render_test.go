@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -238,7 +239,8 @@ func TestPaths(t *testing.T) {
 	}{
 		{goos: "linux", path: filepath.Join(home, ".config", "systemd", "user", "clair.service")},
 		{goos: "linux", env: map[string]string{"XDG_CONFIG_HOME": "/xdg"}, path: filepath.FromSlash("/xdg/systemd/user/clair.service")},
-		{goos: "darwin", path: filepath.Join(home, "Library", "LaunchAgents", "app.claircode.clair.plist"), logFile: filepath.Join(home, "Library", "Logs", "clair", "daemon.log")},
+		// A LaunchAgent's paths are POSIX paths, whatever host renders them.
+		{goos: "darwin", path: path.Join(home, "Library", "LaunchAgents", "app.claircode.clair.plist"), logFile: path.Join(home, "Library", "Logs", "clair", "daemon.log")},
 		{goos: "windows", path: `\clair`, logFile: filepath.Join(home, "AppData", "Local", "clair", "daemon.log")},
 		{goos: "windows", env: map[string]string{"LOCALAPPDATA": "/lad"}, path: `\clair`, logFile: filepath.FromSlash("/lad/clair/daemon.log")},
 	}
