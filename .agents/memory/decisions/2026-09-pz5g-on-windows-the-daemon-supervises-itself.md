@@ -77,4 +77,7 @@ of ADR 2026-09.ahq8 started, stopped and self-updated as designed. A crash did n
 
   Catching `WM_QUERYENDSESSION` / `WM_ENDSESSION` in a hidden top-level window is the known way
   to get that notice. It is not built.
-- **One start is not verified:** the task starting at the user's next logon.
+- **The logon start holds.** After the sign-out, the user's next sign-in (a new session, 2)
+  started the task in the same second. The supervisor and the daemon ran in that session on the
+  release staged before the sign-out, the sweep removed its aside copy, and presence read the new
+  console.
