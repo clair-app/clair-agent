@@ -8,7 +8,7 @@ topics: [daemon, cli, install]
 
 # ADR 2026-09.ahq8 — The daemon runs as a per-user login service, never a system service
 
-Status: Accepted (2026-09-23); the macOS half checked on a hosted runner (ADR 2026-09.c93f), the Windows half awaits a pass on real hardware; replacing the running binary is ADR 2026-09.qk6v's
+Status: Accepted (2026-09-23); the macOS half checked on a hosted runner (ADR 2026-09.c93f); the Windows half checked on `win11` on 2026-09-25 (ADR 2026-09.pz5g): the non-elevated logon task, the UTF-16 XML, `conhost --headless` quoting with no window, and presence hold, but `RestartOnFailure` never sees a crash (the daemon now supervises itself there) and a logoff ends the daemon without a clean stop; replacing the running binary is ADR 2026-09.qk6v's
 
 **What was observed.** Until now `clair daemon` ran in a terminal. RELAY.md §6 has `install.sh`
 set up "binary + user service, then `clair pair`", and §15 left Windows open, favouring "a

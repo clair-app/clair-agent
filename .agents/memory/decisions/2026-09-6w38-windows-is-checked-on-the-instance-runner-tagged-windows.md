@@ -71,7 +71,9 @@ runs in seconds once Go is cached.
   `clair.exe` being replaced. So that copy is a running image too when it is moved aside, and it
   stays until the sweep, as ADR 2026-09.qk6v's design allows. The job expects both aside copies
   after the second update.
-- **The runner is one machine.** While it is offline, a pipeline that needs the job waits.
+- **The runner is one machine, and people use it too.** The job's daemon and release server take
+  ports 17417 and 18001; a trial on the same machine once took 7417 and failed a run.
+  While the machine is offline, a pipeline that needs the job waits.
   - `timeout: 30m` bounds a hung run, but not a job no runner picks up.
   - If the machine goes away, remove the job, or mark it `allow_failure` with a manual start.
   - Go and its module cache persist under `$CI_BUILDS_DIR\.clair-tools` on that machine.

@@ -41,7 +41,8 @@ false` stops the background update check), `host.key`, and one `pairs/<id>.json`
 
 `clair service install` registers **this binary, where it is**, as a service of the current user
 and starts it: a systemd user unit on Linux (logs: `journalctl --user -u clair`), a LaunchAgent
-on macOS, and a Scheduled Task on Windows that starts at logon under `conhost --headless` (logs:
+on macOS, and a Scheduled Task on Windows that starts at logon under `conhost --headless`, with the
+daemon under a small supervisor of its own that restarts it after a crash (logs:
 `daemon.log` under `~/Library/Logs/clair` or `%LocalAppData%\clair`). It is never a system
 service, because the daemon reads the user's own terminal input idle.
 
