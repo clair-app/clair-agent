@@ -25,9 +25,9 @@ linker-injected version.
 | Target | Purpose |
 | --- | --- |
 | `make tools` | Install the pinned `golangci-lint` and `govulncheck` into `./bin` (once per clone, and after a pin bump) |
-| `make build` | `./bin/clair` for this host — static, `-trimpath`, version from `git describe` |
+| `make build` | `./bin/clair` for this host — static, `-trimpath`, version from `git describe`. `VERSION=v0.0.1 RELEASE_TEST_KEY=<public key>` makes a build that updates itself from a local release (below) |
 | `make build-all` | Cross-compile linux/darwin/windows × amd64/arm64 into `./dist`, then `tools/machocheck` verifies the darwin builds' code signatures: Apple silicon kills an arm64 binary whose signature is missing or stale |
-| `make dist VERSION=vX.Y.Z` | `build-all` for a release: checks the stamped version, writes `dist/SHA256SUMS.txt`. The tag pipeline runs it and uploads the result (ADR 2026-09.zvs8) |
+| `make dist VERSION=vX.Y.Z` | `build-all` for a release: checks the stamped version, refuses a release test key or fewer than two built-in release keys, writes `dist/SHA256SUMS.txt`. The tag pipeline runs it and uploads the result (ADR 2026-09.zvs8) |
 | `make run ARGS="version"` | `go run ./cmd/clair …` |
 | `make fmt` | Rewrite sources with gofumpt + goimports |
 | `make tidy` | `go mod tidy` |
@@ -51,16 +51,47 @@ linker-injected version.
   `GOOS=windows bin/golangci-lint run` lints one other OS's files.
 - `go run ./tools/machocheck dist/clair-darwin-*` — re-checks the darwin signatures
   without a rebuild.
+- `go run ./cmd/clair update -check` — asks the running daemon whether a newer release exists
+  (a development build says it never updates itself).
 
 ## Cutting a release
 
 1. `make check` on the commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
 2. The tag pipeline's `release` job uploads the builds and `SHA256SUMS.txt` to
    `packages/generic/clair/vX.Y.Z/`.
-3. In clair-web, `node scripts/agent-release.mjs pin vX.Y.Z` hashes the uploaded files into
-   `agent-release.json`. Never pin from a local `dist/`. To check an upload, `make dist
+3. In clair-web, `CLAIR_RELEASE_KEY=<primary key.pem> node scripts/agent-release.mjs pin vX.Y.Z`
+   hashes the uploaded files into `agent-release.json` and signs them with the offline release
+   key. That signature is what every installed agent checks before it updates itself
+   (ADR 2026-09.qk6v). Never pin from a local `dist/`. To check an upload, `make dist
    VERSION=vX.Y.Z` on the tag with the CI image's Go (`golang:1.26`, newest patch): the
    stamped date is the commit's, so the checksums match `SHA256SUMS.txt`.
+
+## Trying the self-update against a local release
+
+A test key, two builds that trust it, and a release served on loopback (ADR 2026-09.qk6v):
+
+```sh
+R=$(mktemp -d); export CLAIR_CONFIG_DIR=$R/config CLAUDE_CONFIG_DIR=$R/claude
+PUB=$(go run ./tools/releasesign keygen -out $R/k.pem)
+for v in v0.0.1 v0.0.2; do
+  make build VERSION=$v RELEASE_TEST_KEY=$PUB
+  mkdir -p $R/rel/$v && cp bin/clair $R/rel/$v/clair-$v-$(go env GOOS)-$(go env GOARCH)
+  (cd $R/rel/$v && sha256sum clair-* > SHA256SUMS.txt)
+  go run ./tools/releasesign sign -key $R/k.pem $R/rel/$v
+done
+echo v0.0.2 > $R/rel/latest.txt
+python3 -m http.server 8000 --bind 127.0.0.1 --directory $R/rel &     # the release server
+mkdir -p ~/clair-trial && cp $R/rel/v0.0.1/clair-* ~/clair-trial/clair  # not under /tmp: refused
+~/clair-trial/clair daemon -listen 127.0.0.1:7417 &                    # v0.0.1
+~/clair-trial/clair update -check -releases http://127.0.0.1:8000      # v0.0.2 is available
+~/clair-trial/clair update -releases http://127.0.0.1:8000             # staged; the daemon still runs v0.0.1
+~/clair-trial/clair version; ~/clair-trial/clair status
+```
+
+`"releases": "http://127.0.0.1:8000"` in `agent.json` points the background check there too. A
+tampered build, a signature by another key and a `latest.txt` older than the binary are all
+refused. `make build` without the variables is the ordinary development build, which never
+updates. Remove `~/clair-trial` afterwards.
 
 ## Running the whole thing without a phone or a relay
 

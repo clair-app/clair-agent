@@ -244,6 +244,7 @@ func cmdStatus(ctx context.Context, d deps, args []string, stdout, stderr io.Wri
 		return exitOK
 	}
 	printStatus(stdout, st)
+	printSkew(stdout, d.release, st)
 	return exitOK
 }
 
@@ -255,6 +256,7 @@ func printStatus(w io.Writer, st ctl.Status) {
 	} else {
 		fmt.Fprintln(w, "terminal input: no signal — subagent prompts are never handed to the terminal")
 	}
+	printUpdateStatus(w, st.Update)
 	if !st.Paired {
 		if st.Unpaired != "" {
 			fmt.Fprintf(w, "not paired (%s) — run `clair pair`\n", st.Unpaired)

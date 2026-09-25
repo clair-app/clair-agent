@@ -61,6 +61,9 @@ type Controller interface {
 	// ReleasePair stops a pair and hands its file to the caller;
 	// ctl.ErrNotFound is 404.
 	ReleasePair(ctx context.Context, pairID string) error
+	// Update checks for a release and stages it unless req.Check; the
+	// result carries any failure.
+	Update(ctx context.Context, req ctl.UpdateRequest) ctl.UpdateResult
 }
 
 // Options configure a Server.
@@ -453,6 +456,19 @@ func (s *Server) serveControl(w http.ResponseWriter, r *http.Request) {
 		s.log.Info("stop requested through the control surface")
 		s.control.Stop()
 		w.WriteHeader(http.StatusAccepted)
+	case r.URL.Path == ctl.PathUpdate:
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		q := r.URL.Query()
+		res := s.control.Update(r.Context(), ctl.UpdateRequest{Check: q.Get("check") == "1", Releases: q.Get("releases")})
+		data, err := json.Marshal(res)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
 	case strings.HasPrefix(r.URL.Path, ctl.PathPairs):
 		if !requireMethod(w, r, http.MethodDelete) {
 			return

@@ -16,8 +16,10 @@ someone is typing at one, and held for the watch otherwise (RELAY.md §4.3; the 
 terminal input idle the way `w` does, no helper, no extra hook). `clair service install` runs the
 daemon as your login service (verified on Linux; the macOS and Windows halves are written and
 tested, not yet run on hardware). A `vX.Y.Z` tag publishes the builds to the package registry,
-and claircode.app's `install.sh` / `install.ps1` serve them (ADR 2026-09.zvs8). Not yet: the Android side of the
-relay.
+and claircode.app's `install.sh` / `install.ps1` serve them (ADR 2026-09.zvs8). After that the
+agent keeps itself current. About every six hours it checks claircode.app, verifies a new release's
+signature against the keys built into it, and puts the new binary where the old one is. The new
+binary runs from the agent's next start (ADR 2026-09.qk6v). Not yet: the Android side of the relay.
 
 ```text
 clair daemon      serve Claude Code's hooks on loopback and tunnel them to the phone
@@ -25,13 +27,14 @@ clair pair        show a QR for the phone to scan; write the pair and the hooks
 clair unpair      revoke the pair, remove the hooks and the keys
 clair status      what the running agent is doing
 clair service     install, start, stop or remove the daemon as a login service
+clair update      install the newest release now (-check only looks)
 clair statusline  the statusLine command settings.json points at
 clair version
 ```
 
 Config lives under `os.UserConfigDir()/clair` (`~/.config/clair` on Linux; `CLAIR_CONFIG_DIR`
-overrides): `agent.json` (the loopback bearer, the admin token, the relay URL), `host.key`, and
-one `pairs/<id>.json` per pair. Flags: `-config-dir`, `-log-level`, `-relay`, `-relay-ca`;
+overrides): `agent.json` (the loopback bearer, the admin token, the relay URL; `"autoUpdate":
+false` stops the background update check), `host.key`, and one `pairs/<id>.json` per pair. Flags: `-config-dir`, `-log-level`, `-relay`, `-relay-ca`;
 `clair pair` adds `-qr unicode|ascii|none`, `-invert`, `-replace`, `-yes`.
 
 ### Running as a service

@@ -8,7 +8,7 @@ topics: [release, install, ci]
 
 # ADR 2026-09.zvs8 — releases are tag pipelines that upload to the package registry, and claircode.app serves them pinned by hash
 
-Status: Accepted (2026-09-24)
+Status: Accepted (2026-09-24); releases are also signed when pinned, and the agent installs them itself (ADR 2026-09.qk6v)
 
 **What was observed.** On 2026-09-24 the agent had no tags and no published builds, and this
 project is private: anonymous requests redirect to a login, so no public URL could serve a

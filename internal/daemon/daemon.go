@@ -24,6 +24,7 @@ import (
 	"claircode.app/clair-agent/internal/relay"
 	"claircode.app/clair-agent/internal/state"
 	"claircode.app/clair-agent/internal/tunnel"
+	"claircode.app/clair-agent/internal/update"
 )
 
 // drainTimeout is how long shutdown lets the tunnel release held decides and
@@ -66,6 +67,11 @@ type Options struct {
 	Presence presence.Sampler
 	// Ready, when set, receives the bound address once the listener is up.
 	Ready chan<- string
+	// Updater keeps the binary current in the background and answers
+	// `clair update` (ADR 2026-09.qk6v); nil when this daemon does not
+	// update itself, and UpdateOff says why.
+	Updater   *update.Updater
+	UpdateOff string
 }
 
 // Run serves until ctx ends, then drains the tunnel and closes the listener.
@@ -145,6 +151,14 @@ func Run(ctx context.Context, o Options) error {
 	}
 	serveDone := make(chan error, 1)
 	wg.Go(func() { serveDone <- srv.Serve(serveCtx, ln) })
+	// The updater only swaps a file; it stops with the daemon, whichever way
+	// the daemon stops.
+	updateCtx, stopUpdate := context.WithCancel(ctx)
+	defer stopUpdate()
+	if o.Updater != nil {
+		o.Updater.Sweep()
+		wg.Go(func() { o.Updater.Run(updateCtx) })
+	}
 	d.log.Info("agent listening", "listen", d.listen, "relay", o.Agent.Relay, "version", o.Version, "pairs", d.pairCount())
 	if o.Ready != nil {
 		o.Ready <- d.listen
@@ -162,6 +176,7 @@ func Run(ctx context.Context, o Options) error {
 		d.log.Error("listener stopped", "error", describe(err))
 	}
 	stopTunnel()
+	stopUpdate()
 	<-tunnelDone
 	wg.Wait()
 	return err
@@ -245,7 +260,44 @@ func (d *daemon) Status(context.Context) ctl.Status {
 	if s := d.opts.Presence.Sample(); s.Known {
 		st.Presence = &ctl.Presence{IdleMs: s.Idle.Milliseconds(), Source: s.Source}
 	}
+	st.Update = d.updateStatus()
 	return st
+}
+
+func (d *daemon) updateStatus() *ctl.UpdateStatus {
+	if d.opts.Updater == nil {
+		return &ctl.UpdateStatus{Off: d.opts.UpdateOff}
+	}
+	s := d.opts.Updater.Status()
+	return &ctl.UpdateStatus{
+		Paused:      !s.Enabled,
+		Path:        d.opts.Updater.Path(),
+		Latest:      s.Latest,
+		Staged:      s.Staged,
+		Note:        s.Note,
+		LastCheckAt: s.CheckedAt,
+		LastError:   s.Err,
+	}
+}
+
+// Update runs `clair update` in the daemon, one check at a time with the
+// background loop, so its status stays true.
+func (d *daemon) Update(ctx context.Context, req ctl.UpdateRequest) ctl.UpdateResult {
+	if d.opts.Updater == nil {
+		return ctl.UpdateResult{Outcome: ctl.OutcomeOff, Running: d.opts.Version, Note: d.opts.UpdateOff}
+	}
+	res, err := d.opts.Updater.Check(ctx, update.Request{Stage: !req.Check, Releases: req.Releases})
+	return UpdateResult(d.opts.Version, res, err)
+}
+
+// UpdateResult is an update check as the control surface reports it; `clair
+// update` uses it too when it runs the check itself.
+func UpdateResult(running string, res update.Result, err error) ctl.UpdateResult {
+	out := ctl.UpdateResult{Outcome: string(res.Outcome), Running: running, Latest: res.Latest, Path: res.Path, Note: res.Note}
+	if err != nil {
+		out.Outcome, out.Error = ctl.OutcomeFailed, err.Error()
+	}
+	return out
 }
 
 // Reload re-reads host.key and the pair files and makes the tunnel match.

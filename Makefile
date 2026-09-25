@@ -20,6 +20,15 @@ COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
+# A release-signing key to trust besides the built-in ones, for trying the
+# self-update against a local release: `make build VERSION=v0.0.1
+# RELEASE_TEST_KEY=$(go run ./tools/releasesign pubkey -key k.pem)`. Such a build
+# says so in `clair version`, and `make dist` refuses it (ADR 2026-09.qk6v).
+RELEASE_TEST_KEY ?=
+ifneq ($(RELEASE_TEST_KEY),)
+LDFLAGS += -X main.releaseTestKey=$(RELEASE_TEST_KEY)
+endif
+
 # The agent is a static binary for a `curl | sh` install (RELAY.md §15): no cgo,
 # no build path in the panics, reproducible for a given commit. CGO_ENABLED=0 is
 # scoped to the build targets — the race detector in `make test` needs cgo.
@@ -62,9 +71,15 @@ build-all: ## Cross-compile every supported platform into ./dist
 dist: build-all ## build-all for a release: check the stamped version, write dist/SHA256SUMS.txt
 	@echo "$(VERSION)" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$$' || \
 		{ echo "dist: VERSION=$(VERSION) is not a vX.Y.Z release tag" >&2; exit 1; }
+	@[ -z "$(RELEASE_TEST_KEY)" ] || \
+		{ echo "dist: RELEASE_TEST_KEY is set; a release trusts only the built-in keys" >&2; exit 1; }
+	@go run ./tools/releasesign builtin > /dev/null || \
+		{ echo "dist: a release needs the primary and backup release keys built in" >&2; exit 1; }
 	@host=dist/clair-$$(go env GOOS)-$$(go env GOARCH)$$( [ "$$(go env GOOS)" = windows ] && echo .exe); \
 		$$host version | grep -q "^clair $(VERSION) " || \
-		{ echo "dist: $$host reports '$$($$host version)', not $(VERSION)" >&2; exit 1; }
+		{ echo "dist: $$host reports '$$($$host version)', not $(VERSION)" >&2; exit 1; }; \
+		! $$host version | grep -q "release test key" || \
+		{ echo "dist: $$host was built with a release test key" >&2; exit 1; }
 	cd dist && rm -f SHA256SUMS.txt && sha256sum clair-* > SHA256SUMS.txt
 	@cat dist/SHA256SUMS.txt
 

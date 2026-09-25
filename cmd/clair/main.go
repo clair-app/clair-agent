@@ -44,6 +44,11 @@ var (
 	version = "dev"
 	commit  = "none"
 	date    = "unknown"
+	// A release-signing key to trust besides the built-in ones, for trying
+	// the self-update against a local release (`make build
+	// RELEASE_TEST_KEY=…`). Only the linker sets it, never anything at run
+	// time, and `make dist` refuses a build that has one (ADR 2026-09.qk6v).
+	releaseTestKey = ""
 )
 
 // Exit statuses.
@@ -57,7 +62,9 @@ const (
 // deps are the process-level things a command needs, injected so `run` can
 // be tested without a process: the environment, the clock, entropy, stdin,
 // and where this binary and the home directory are; for `clair service`, the
-// OS, the user, the temporary directory and a way to run the OS's commands.
+// OS, the user, the temporary directory and a way to run the OS's commands;
+// for the self-update, the linker-stamped version, a test key and a way to
+// ask a binary its version.
 type deps struct {
 	getenv  func(string) string
 	now     func() time.Time
@@ -66,10 +73,18 @@ type deps struct {
 	exe     func() (string, error)
 	home    func() (string, error)
 	goos    string
+	goarch  string
 	uid     int
 	sid     func() (string, error)
 	tempDir string
 	runner  service.Runner
+	// release is the version the linker stamped, not buildVersion's: since
+	// Go 1.24 a plain `go build` on a tag reports the tag, and such a build
+	// must never replace itself.
+	release        string
+	releaseTestKey string
+	// runVersion runs `<path> version`; nil runs it for real.
+	runVersion func(ctx context.Context, path string) (string, error)
 }
 
 func main() {
@@ -84,7 +99,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 	return runWith(ctx, deps{
 		getenv: os.Getenv, now: time.Now, entropy: rand.Reader, stdin: os.Stdin, exe: os.Executable, home: os.UserHomeDir,
-		goos: runtime.GOOS, uid: os.Getuid(), sid: userSID, tempDir: os.TempDir(), runner: service.Exec,
+		goos: runtime.GOOS, goarch: runtime.GOARCH, uid: os.Getuid(), sid: userSID, tempDir: os.TempDir(), runner: service.Exec,
+		release: version, releaseTestKey: releaseTestKey,
 	}, args, stdout, stderr)
 }
 
@@ -132,9 +148,14 @@ func runWith(ctx context.Context, d deps, args []string, stdout, stderr io.Write
 		return cmdService(ctx, d, args[1:], stdout, stderr)
 	case "hook-event":
 		return cmdHookEvent(ctx, d, args[1:], stderr)
+	case "update":
+		return cmdUpdate(ctx, d, args[1:], stdout, stderr)
 	case "version":
 		v, c, t := buildVersion()
 		fmt.Fprintf(stdout, "clair %s (%s, %s)\n", v, c, t)
+		if d.releaseTestKey != "" {
+			fmt.Fprintln(stdout, testKeyLine)
+		}
 		return exitOK
 	case "help", "-h", "--help":
 		usage(stdout)
@@ -155,6 +176,7 @@ commands:
   unpair      revoke the pair, remove the hooks and the keys
   status      what the running agent is doing (exit 3 when it is not running)
   service     install, start, stop or remove the agent as a login service
+  update      install the newest release now (the agent also does it by itself)
   statusline  the statusLine command settings.json points at: forward usage, run yours
   hook-event  the SessionStart command hook: forward stdin to the agent, never fail
   version     print the agent version
@@ -281,11 +303,20 @@ func cmdDaemon(ctx context.Context, d deps, args []string, stderr io.Writer) int
 		fmt.Fprintf(stderr, "clair daemon: %v\n", err)
 		return exitUsage
 	}
-	v, _, _ := buildVersion()
+	v := d.agentVersion()
 	installer, err := snippetInstaller(d, agent, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "clair daemon: %v\n", err)
 		return exitError
+	}
+	// agent.json is read before every background check, so turning
+	// autoUpdate off needs no restart.
+	updater, updateOff := newUpdater(d, agent, "", log, func() bool {
+		a, loadErr := dir.LoadAgent()
+		return loadErr != nil || a.AutoUpdates()
+	})
+	if updateOff != "" {
+		log.Info("self-update off", "reason", updateOff)
 	}
 	err = daemon.Run(ctx, daemon.Options{
 		Dir:       dir,
@@ -297,6 +328,8 @@ func cmdDaemon(ctx context.Context, d deps, args []string, stderr io.Writer) int
 		Entropy:   d.entropy,
 		RelayCA:   pool,
 		Installer: installer,
+		Updater:   updater,
+		UpdateOff: updateOff,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "clair daemon: %v\n", err)
@@ -411,6 +444,16 @@ func readAgent(path string) (state.Agent, bool) {
 		return state.Agent{}, false
 	}
 	return agent, true
+}
+
+// agentVersion is the version this build reports: the linker's, else what
+// buildVersion finds. The two agree in production; tests inject the first.
+func (d deps) agentVersion() string {
+	if d.release != "" && d.release != "dev" {
+		return d.release
+	}
+	v, _, _ := buildVersion()
+	return v
 }
 
 // buildVersion prefers the linker-injected values and falls back to what the

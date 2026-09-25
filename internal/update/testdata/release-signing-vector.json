@@ -1,0 +1,9 @@
+{
+  "comment": "Release signing (clair-agent internal/update, clair-web scripts/agent-release.mjs): signature = Ed25519(seed, context || sums), standard base64. seed is SHA-256(\"clair release signing vector v1\"). Copy this file unchanged; a mismatch is a bug in one signer.",
+  "context": "clair-release-v1\n",
+  "publicKey": "EFdSKS14/SxvSAQe9NLi4K0PP86Dv2XJP9EXTDNsX7g=",
+  "seed": "Q3VXGijecU3kBy3vKU+MHki9jENccUsJtr87iQ64bl4=",
+  "signature": "qLPlTiylfPLJ8REFmEfnnQMRBzTArLBks5aEML1EkbWfj0MtE9iFRSQ2AbTfK8q/RbiRLzsQ/hXi5TPddayrDA==",
+  "sums": "561ceed66acb332152cf7a017728dc71678fcb96047893d6509ff98fdb53c763  clair-v0.1.0-darwin-amd64\ne5ae4dccd40243d72d33a821ecf76d50ec504ecd8d34549c4f80c6796afea1e3  clair-v0.1.0-darwin-arm64\nb99d2ce612f9379d6c0f5381e7b16797d7ddc6232e6cb518eba7eb2534469566  clair-v0.1.0-linux-amd64\nb30f8acd7f3bac0d639c45d919e2893dc5d4f9965338896a2b4d3638aa2ea735  clair-v0.1.0-linux-arm64\n6553c891e9060241c4ceff9decdc4715ce5f427e712e8635e6c1ebd976cb898e  clair-v0.1.0-windows-amd64.exe\n033bd5716a5aaaee83b178a4731c5418f78b7c7f0c1911935b29d74a5ea96779  clair-v0.1.0-windows-arm64.exe\n",
+  "version": "v0.1.0"
+}

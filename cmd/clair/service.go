@@ -98,7 +98,7 @@ func cmdService(ctx context.Context, d deps, args []string, stdout, stderr io.Wr
 		agent = a
 	}
 	control := controlClient(agent)
-	s := serviceCmd{name: name, control: control, stdout: stdout, stderr: stderr}
+	s := serviceCmd{name: name, control: control, stdout: stdout, stderr: stderr, release: d.release}
 	if s.m, err = newServiceManager(d, control); err != nil {
 		return s.fail(err)
 	}
@@ -141,6 +141,8 @@ type serviceCmd struct {
 	m              service.Manager
 	control        *ctl.Client
 	stdout, stderr io.Writer
+	// release is this binary's linker-stamped version.
+	release string
 }
 
 // fail reports err, with what to do instead when the manager is missing.
@@ -294,6 +296,7 @@ func (s serviceCmd) status(ctx context.Context, agent state.Agent) int {
 		fmt.Fprintf(s.stdout, "agent:   not answering on %s\n", agent.Listen)
 	} else {
 		fmt.Fprintf(s.stdout, "agent:   clair %s answering on %s, up %s\n", status.Version, status.Listen, (time.Duration(status.UptimeSec) * time.Second).String())
+		printSkew(s.stdout, s.release, status)
 	}
 	if st.Installed {
 		fmt.Fprintf(s.stdout, "logs:    %s\n", s.m.Logs())

@@ -1,8 +1,13 @@
 // Package ctl is the daemon's control surface as the CLI sees it: the JSON it
 // answers on the loopback listener under /clair/ctl and a client for it.
 // `clair status` reads it; `clair pair` asks the daemon to release a pair and
-// to reload; `clair service stop` asks it to stop. It shares the hook listener but not the hook bearer: the admin
-// token never leaves the config directory.
+// to reload; `clair service stop` asks it to stop; `clair update` asks it to
+// check for a release. It shares the hook listener but not the hook bearer:
+// the admin token never leaves the config directory.
+//
+// After a self-update the CLI on disk can be newer than the running daemon,
+// by any number of releases, so this JSON only ever gains fields
+// (ADR 2026-09.66m4).
 package ctl
 
 import (
@@ -27,7 +32,14 @@ const (
 	PathReload = Prefix + "reload"
 	PathStop   = Prefix + "stop"
 	PathPairs  = Prefix + "pairs/"
+	// PathUpdate takes `check=1` to only look, and `releases=<url>` to read
+	// another release server.
+	PathUpdate = Prefix + "update"
 )
+
+// updateTimeout bounds `clair update` through the daemon: a download of a
+// build over a slow link, then its first run.
+const updateTimeout = 12 * time.Minute
 
 // Errors a caller can test with errors.Is.
 var (
@@ -52,6 +64,63 @@ type Status struct {
 	// Presence is the host's terminal-input reading at the time of the call
 	// (RELAY.md §4.3); nil when the host has no signal.
 	Presence *Presence `json:"presence,omitempty"`
+	// Update is the self-updater's state; nil from a daemon older than it.
+	Update *UpdateStatus `json:"update,omitempty"`
+}
+
+// UpdateStatus is what the daemon knows about releases (ADR 2026-09.qk6v).
+type UpdateStatus struct {
+	// Off says why this daemon never updates itself; "" when it does.
+	Off string `json:"off,omitempty"`
+	// Paused is agent.json's autoUpdate turned off: no background check,
+	// though `clair update` still runs one.
+	Paused bool `json:"paused,omitempty"`
+	// Path is the binary the updater replaces.
+	Path string `json:"path,omitempty"`
+	// Latest is the newest release at the last successful check.
+	Latest string `json:"latest,omitempty"`
+	// Staged is a release swapped onto disk that the daemon is not running
+	// yet; it runs from the next start.
+	Staged string `json:"staged,omitempty"`
+	// Note says why the last check left the binary on disk alone.
+	Note string `json:"note,omitempty"`
+	// LastCheckAt is when the last check finished; LastError its failure.
+	LastCheckAt time.Time `json:"lastCheckAt,omitzero"`
+	LastError   string    `json:"lastError,omitempty"`
+}
+
+// Update outcomes: internal/update's, plus the two the daemon adds.
+const (
+	OutcomeUpToDate      = "up-to-date"
+	OutcomeAvailable     = "available"
+	OutcomeStaged        = "staged"
+	OutcomeAlreadyStaged = "already-staged"
+	OutcomeLeftAlone     = "left-alone"
+	// OutcomeOff is a daemon that does not update itself (UpdateResult.Note says why).
+	OutcomeOff = "off"
+	// OutcomeFailed is a check that failed (UpdateResult.Error).
+	OutcomeFailed = "failed"
+)
+
+// UpdateRequest is one `clair update`.
+type UpdateRequest struct {
+	// Check only looks; otherwise a newer release is staged.
+	Check bool
+	// Releases reads another release server this once; "" is the daemon's.
+	Releases string
+}
+
+// UpdateResult is what an update check found or did.
+type UpdateResult struct {
+	Outcome string `json:"outcome"`
+	// Running is the version the daemon runs.
+	Running string `json:"running"`
+	// Latest is the newest release, when the check got that far.
+	Latest string `json:"latest,omitempty"`
+	// Path is the binary checked or replaced.
+	Path  string `json:"path,omitempty"`
+	Note  string `json:"note,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // Presence is one reading of the host's terminal input idle.
@@ -143,10 +212,39 @@ func (c *Client) ReleasePair(ctx context.Context, pairID string) error {
 	return err
 }
 
+// Update asks the daemon to check for a release, and to stage it unless
+// req.Check. A daemon older than the self-updater answers ErrNotFound.
+func (c *Client) Update(ctx context.Context, req UpdateRequest) (UpdateResult, error) {
+	var res UpdateResult
+	q := url.Values{}
+	if req.Check {
+		q.Set("check", "1")
+	}
+	if req.Releases != "" {
+		q.Set("releases", req.Releases)
+	}
+	path := PathUpdate
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	body, err := c.callTimeout(ctx, http.MethodPost, path, updateTimeout)
+	if err != nil {
+		return res, err
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		return res, fmt.Errorf("ctl: decode update: %w", err)
+	}
+	return res, nil
+}
+
 func (c *Client) call(ctx context.Context, method, path string) ([]byte, error) {
+	return c.callTimeout(ctx, method, path, 5*time.Second)
+}
+
+func (c *Client) callTimeout(ctx context.Context, method, path string, timeout time.Duration) ([]byte, error) {
 	httpClient := c.HTTP
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 5 * time.Second}
+		httpClient = &http.Client{Timeout: timeout}
 	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(c.Base, "/")+path, http.NoBody)
 	if err != nil {

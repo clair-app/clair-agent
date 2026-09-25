@@ -71,6 +71,17 @@ type Agent struct {
 	Relay string `json:"relay"`
 	// LogLevel is the daemon's default log level.
 	LogLevel string `json:"logLevel"`
+	// AutoUpdate false turns off the daemon's background update check
+	// (ADR 2026-09.qk6v); absent is on. `clair update` still works.
+	AutoUpdate *bool `json:"autoUpdate,omitempty"`
+	// Releases is the release server the updater reads; absent is
+	// claircode.app's.
+	Releases string `json:"releases,omitempty"`
+}
+
+// AutoUpdates reports whether the background update check is on.
+func (a Agent) AutoUpdates() bool {
+	return a.AutoUpdate == nil || *a.AutoUpdate
 }
 
 // Pair is pairs/<id>.json.

@@ -13,7 +13,12 @@ ADR 2026-09.kau2; the design constraints come from `RELAY.md` (see `context/desi
   `tunnel`, `pairing`), never `util`, `common` or `helpers`.
 - `tools/` holds developer tools; they are `go run`, never shipped. `tools/adr` and
   `tools/machocheck` are stdlib-only; `tools/phonesim` and `tools/relaysim` may import `internal/` and
-  `golang.org/x`, because they *are* the far end of the protocol.
+  `golang.org/x`, because they *are* the far end of the protocol; `tools/releasesign` imports
+  `internal/update`, so it signs exactly what the agent verifies.
+- The binary on disk can be newer than the running daemon, by any number of releases, after a
+  self-update (ADR 2026-09.66m4). `/clair/v1`, `/clair/ctl` and its JSON, `agent.json`, the pair
+  files, and the `daemon` / `hook-event` / `statusline` command lines only ever gain fields, paths
+  and flags; a new field's zero value means the old behaviour.
 - OS-specific code goes behind build tags (`_linux.go`, `_darwin.go`, `_windows.go`), and
   `make build-all` must keep compiling for all six targets in the Makefile. `make lint`
   lints each OS's files, tests included, from any host.

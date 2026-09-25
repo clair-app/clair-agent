@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -66,6 +67,7 @@ type fakeControl struct {
 	reloads  int
 	stops    int
 	released []string
+	updates  []ctl.UpdateRequest
 }
 
 func (*fakeControl) Status(context.Context) ctl.Status {
@@ -93,6 +95,13 @@ func (f *fakeControl) ReleasePair(_ context.Context, id string) error {
 	}
 	f.released = append(f.released, id)
 	return nil
+}
+
+func (f *fakeControl) Update(_ context.Context, req ctl.UpdateRequest) ctl.UpdateResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updates = append(f.updates, req)
+	return ctl.UpdateResult{Outcome: ctl.OutcomeUpToDate, Running: "v0.1.0", Latest: "v0.1.0"}
 }
 
 func newServer(t *testing.T, sink *fakeSink, control Controller) *Server {
@@ -150,6 +159,9 @@ func TestGuardOrder(t *testing.T) {
 		{name: "control without auth", method: "GET", path: ctl.PathStatus, want: 401},
 		{name: "control with the admin token", method: "GET", path: ctl.PathStatus, auth: "Bearer " + admin, want: 200},
 		{name: "unknown control path", method: "GET", path: ctl.Prefix + "nope", auth: "Bearer " + admin, want: 404},
+		{name: "update with the hook token", method: "POST", path: ctl.PathUpdate, auth: bearer, want: 401},
+		{name: "update without auth", method: "POST", path: ctl.PathUpdate, want: 401},
+		{name: "update by GET", method: "GET", path: ctl.PathUpdate, auth: "Bearer " + admin, want: 405},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -485,6 +497,17 @@ func TestStatusAndControl(t *testing.T) {
 	}
 	if rec := do(t, s, "POST", ctl.PathPairs+"p1", "Bearer "+admin, nil, nil); rec.Code != 405 {
 		t.Errorf("POST pairs = %d, want 405", rec.Code)
+	}
+	for _, path := range []string{ctl.PathUpdate, ctl.PathUpdate + "?check=1&releases=http%3A%2F%2F127.0.0.1%3A8000"} {
+		rec := do(t, s, "POST", path, "Bearer "+admin, nil, nil)
+		var res ctl.UpdateResult
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &res) != nil || res.Outcome != ctl.OutcomeUpToDate {
+			t.Errorf("POST %s = %d %s, want 200 and the controller's result", path, rec.Code, rec.Body.String())
+		}
+	}
+	want := []ctl.UpdateRequest{{}, {Check: true, Releases: "http://127.0.0.1:8000"}}
+	if !slices.Equal(control.updates, want) {
+		t.Errorf("update requests = %+v, want %+v", control.updates, want)
 	}
 }
 

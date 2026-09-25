@@ -73,6 +73,39 @@ func TestEnsureAgentCreatesOnceAndKeepsIt(t *testing.T) {
 	assertMode(t, filepath.Join(d.Path(), agentFile), 0o600)
 }
 
+func TestAgentUpdateSettings(t *testing.T) {
+	t.Parallel()
+
+	d := openDir(t)
+	a, _, err := d.EnsureAgent(&counting{}, Agent{Listen: "127.0.0.1:7317"})
+	if err != nil {
+		t.Fatalf("EnsureAgent: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(d.Path(), agentFile))
+	if err != nil {
+		t.Fatalf("read agent.json: %v", err)
+	}
+	if strings.Contains(string(data), "autoUpdate") || strings.Contains(string(data), "releases") {
+		t.Errorf("a default agent.json names the update settings:\n%s", data)
+	}
+	if !a.AutoUpdates() {
+		t.Error("AutoUpdates() is false without the setting")
+	}
+
+	off := false
+	a.AutoUpdate, a.Releases = &off, "http://127.0.0.1:8000"
+	if saveErr := d.SaveAgent(a); saveErr != nil {
+		t.Fatalf("SaveAgent: %v", saveErr)
+	}
+	back, err := d.LoadAgent()
+	if err != nil {
+		t.Fatalf("LoadAgent: %v", err)
+	}
+	if back.AutoUpdates() || back.Releases != a.Releases {
+		t.Errorf("reloaded autoUpdate=%v releases=%q, want false and %q", back.AutoUpdates(), back.Releases, a.Releases)
+	}
+}
+
 func TestEnsureAgentRace(t *testing.T) {
 	t.Parallel()
 
