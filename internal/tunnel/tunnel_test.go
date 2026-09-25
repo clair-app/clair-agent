@@ -1196,6 +1196,9 @@ func TestDrainReleasesHoldsAndFlushesQueues(t *testing.T) {
 		drainCtx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 		h.tun.Drain(drainCtx)
+		// Drain releases the hold; the goroutine holding it still has to run to
+		// report that.
+		synctest.Wait()
 		select {
 		case ok := <-got:
 			if ok {
