@@ -43,7 +43,7 @@
   <Actions Context="Author">
     <Exec>
       <Command>%SystemRoot%\System32\conhost.exe</Command>
-      <Arguments>--headless C:\Users\jane\AppData\Local\Programs\clair\clair.exe daemon -config-dir C:\Users\jane\AppData\Roaming\clair -log-file C:\Users\jane\AppData\Local\clair\daemon.log</Arguments>
+      <Arguments>--headless C:\Users\jane\AppData\Local\Programs\clair\clair.exe daemon -config-dir C:\Users\jane\AppData\Roaming\clair -log-file C:\Users\jane\AppData\Local\clair\daemon.log -supervise</Arguments>
     </Exec>
   </Actions>
 </Task>

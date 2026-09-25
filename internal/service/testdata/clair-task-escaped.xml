@@ -43,7 +43,7 @@
   <Actions Context="Author">
     <Exec>
       <Command>%SystemRoot%\System32\conhost.exe</Command>
-      <Arguments>--headless &#34;C:\Users\Jane Doe\bin\clair.exe&#34; daemon -config-dir &#34;C:\Users\Jane Doe\R&amp;D &lt;x&gt;\\&#34; -relay-ca &#34;C:\ca\say \&#34;hi\&#34;.pem&#34;</Arguments>
+      <Arguments>--headless &#34;C:\Users\Jane Doe\bin\clair.exe&#34; daemon -config-dir &#34;C:\Users\Jane Doe\R&amp;D &lt;x&gt;\\&#34; -relay-ca &#34;C:\ca\say \&#34;hi\&#34;.pem&#34; -supervise</Arguments>
     </Exec>
   </Actions>
 </Task>

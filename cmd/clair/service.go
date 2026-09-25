@@ -173,6 +173,9 @@ func (s serviceCmd) install(ctx context.Context, d deps, dirPath, relayCA string
 	if lf := s.m.LogFile(); lf != "" {
 		spec.Args = append(spec.Args, "-log-file", lf)
 	}
+	if !s.m.RestartsOnCrash() {
+		spec.Args = append(spec.Args, "-supervise")
+	}
 	if printOnly {
 		text, renderErr := s.m.Render(spec)
 		if renderErr != nil {

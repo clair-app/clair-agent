@@ -75,7 +75,7 @@ func TestServiceInstallPrint(t *testing.T) {
 	for goos, want := range map[string][]string{
 		"linux":   {"ExecStart=", " daemon -config-dir ", "Environment=\"HTTPS_PROXY=http://proxy:3128\""},
 		"darwin":  {"<string>-log-file</string>", "Library/Logs/clair/daemon.log", "<key>HTTPS_PROXY</key>"},
-		"windows": {"conhost.exe", "-log-file", "<UserId>S-1-5-21-1-2-3-1001</UserId>"},
+		"windows": {"conhost.exe", "-log-file", "<UserId>S-1-5-21-1-2-3-1001</UserId>", " -supervise</Arguments>"},
 	} {
 		t.Run(goos, func(t *testing.T) {
 			t.Parallel()
@@ -93,6 +93,10 @@ func TestServiceInstallPrint(t *testing.T) {
 				if !strings.Contains(stdout.String(), w) {
 					t.Errorf("printed:\n%s\nwant it to contain %q", stdout.String(), w)
 				}
+			}
+			// systemd and launchd restart a crashed daemon themselves.
+			if goos != "windows" && strings.Contains(stdout.String(), "-supervise") {
+				t.Errorf("a %s registration runs the supervisor:\n%s", goos, stdout.String())
 			}
 			if _, err := os.Stat(dir); !os.IsNotExist(err) {
 				t.Errorf("-print created the config directory: %v", err)

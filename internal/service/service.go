@@ -103,6 +103,10 @@ type Manager interface {
 	LogFile() string
 	// Logs tells a person where to read the log.
 	Logs() string
+	// RestartsOnCrash is false where the manager cannot tell a crash from a
+	// clean exit; the service then runs `clair daemon -supervise`
+	// (ADR 2026-09.pz5g).
+	RestartsOnCrash() bool
 	// Render is the unit, plist or task XML for spec, as text.
 	Render(spec Spec) ([]byte, error)
 	// Install writes and registers the service without starting it; changed

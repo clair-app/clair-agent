@@ -36,7 +36,10 @@ func newLaunchd(env Env) *launchd {
 func (*launchd) Kind() string      { return "launchd agent" }
 func (l *launchd) Path() string    { return l.path }
 func (l *launchd) LogFile() string { return path.Join(l.logDir, "daemon.log") }
-func (l *launchd) Logs() string    { return l.LogFile() }
+
+// RestartsOnCrash is KeepAlive's SuccessfulExit false.
+func (*launchd) RestartsOnCrash() bool { return true }
+func (l *launchd) Logs() string        { return l.LogFile() }
 
 // stderrLog catches what the daemon's own log cannot: a panic, or a failure
 // before the log file opened.

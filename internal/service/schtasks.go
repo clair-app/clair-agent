@@ -42,7 +42,12 @@ const stopWait = 5 * time.Second
 func (*taskScheduler) Kind() string      { return "scheduled task" }
 func (*taskScheduler) Path() string      { return `\` + Name }
 func (t *taskScheduler) LogFile() string { return filepath.Join(t.dir, "daemon.log") }
-func (t *taskScheduler) Logs() string    { return t.LogFile() }
+
+// RestartsOnCrash is false: the task runs conhost --headless, which exits 0
+// whatever the daemon does, so RestartOnFailure only ever sees a success. It
+// covers a launch that fails, nothing more (ADR 2026-09.pz5g).
+func (*taskScheduler) RestartsOnCrash() bool { return false }
+func (t *taskScheduler) Logs() string        { return t.LogFile() }
 
 // xmlPath keeps the XML the task was registered from, so an unchanged
 // install registers nothing.

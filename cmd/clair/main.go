@@ -34,6 +34,7 @@ import (
 	"claircode.app/clair-agent/internal/relay"
 	"claircode.app/clair-agent/internal/service"
 	"claircode.app/clair-agent/internal/state"
+	"claircode.app/clair-agent/internal/supervisor"
 )
 
 // Set by the linker from the Makefile (`-X main.version=…`); date is the
@@ -85,6 +86,9 @@ type deps struct {
 	releaseTestKey string
 	// runVersion runs `<path> version`; nil runs it for real.
 	runVersion func(ctx context.Context, path string) (string, error)
+	// spawn starts a daemon for `clair daemon -supervise`; nil runs this
+	// binary.
+	spawn func(ctx context.Context, exe string, args []string, stderr io.Writer) (supervisor.Child, error)
 }
 
 func main() {
@@ -251,6 +255,7 @@ func cmdDaemon(ctx context.Context, d deps, args []string, stderr io.Writer) int
 	cfg.register(fs)
 	listen := fs.String("listen", "", "loopback address to serve hooks on (default from agent.json, else "+hookserver.ListenDefault+")")
 	logFile := fs.String("log-file", "", "write the log to this file, rotated at 10 MiB, instead of stderr")
+	supervise := fs.Bool("supervise", false, "run the daemon as a child and start it again when it exits abnormally (the Windows scheduled task uses this)")
 	var rf relayFlags
 	rf.register(fs)
 	if err := fs.Parse(args); err != nil {
@@ -262,6 +267,9 @@ func cmdDaemon(ctx context.Context, d deps, args []string, stderr io.Writer) int
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "clair daemon: unexpected argument %q\n", fs.Arg(0))
 		return exitUsage
+	}
+	if *supervise {
+		return superviseDaemon(ctx, d, fs, cfg.dir, *logFile, stderr)
 	}
 	// Under launchd or Task Scheduler nobody reads stderr, so with a log
 	// file everything this command says goes there, failures included.

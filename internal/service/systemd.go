@@ -30,7 +30,10 @@ const unitName = Name + ".service"
 func (*systemd) Kind() string    { return "systemd user unit" }
 func (s *systemd) Path() string  { return s.path }
 func (*systemd) LogFile() string { return "" }
-func (*systemd) Logs() string    { return "journalctl --user -u " + Name }
+
+// RestartsOnCrash is Restart=on-failure.
+func (*systemd) RestartsOnCrash() bool { return true }
+func (*systemd) Logs() string          { return "journalctl --user -u " + Name }
 
 // Render writes the unit. Restart=on-failure brings a crashed daemon back;
 // a clean exit (a stop through the control surface) stays down.

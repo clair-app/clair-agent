@@ -68,7 +68,7 @@ var renderCases = []struct {
 		golden: "clair-task.xml", goos: "windows", home: `C:\Users\jane`,
 		spec: Spec{
 			Exe:  `C:\Users\jane\AppData\Local\Programs\clair\clair.exe`,
-			Args: []string{"daemon", "-config-dir", `C:\Users\jane\AppData\Roaming\clair`, "-log-file", `C:\Users\jane\AppData\Local\clair\daemon.log`},
+			Args: []string{"daemon", "-config-dir", `C:\Users\jane\AppData\Roaming\clair`, "-log-file", `C:\Users\jane\AppData\Local\clair\daemon.log`, "-supervise"},
 			Env:  []string{"HTTPS_PROXY=http://proxy.corp:3128"},
 		},
 	},
@@ -76,7 +76,7 @@ var renderCases = []struct {
 		golden: "clair-task-escaped.xml", goos: "windows", home: `C:\Users\Jane Doe`,
 		spec: Spec{
 			Exe:  `C:\Users\Jane Doe\bin\clair.exe`,
-			Args: []string{"daemon", "-config-dir", `C:\Users\Jane Doe\R&D <x>\`, "-relay-ca", `C:\ca\say "hi".pem`},
+			Args: []string{"daemon", "-config-dir", `C:\Users\Jane Doe\R&D <x>\`, "-relay-ca", `C:\ca\say "hi".pem`, "-supervise"},
 		},
 	},
 }

@@ -179,7 +179,7 @@ windows:
       go build -o "$work\releasesign.exe" ./tools/releasesign
       $pub = (& "$work\releasesign.exe" keygen -out "$work\test.pem" | Out-String).Trim()
       & "$work\releasesign.exe" keygen -out "$work\foreign.pem" | Out-Null
-      foreach ($v in 'v0.0.1', 'v0.0.2', 'v0.0.3', 'v0.0.4', 'v0.0.5') {
+      foreach ($v in 'v0.0.1', 'v0.0.2', 'v0.0.3', 'v0.0.4', 'v0.0.5', 'v0.0.6') {
         $dir = "$rel\$v"; $name = "clair-$v-windows-amd64.exe"
         New-Item -ItemType Directory -Force $dir | Out-Null
         go build -trimpath -ldflags "-s -w -X main.version=$v -X main.releaseTestKey=$pub" -o "$dir\$name" ./cmd/clair
@@ -243,6 +243,28 @@ windows:
       Check ((Asides).Count -eq 0) 'the sweep removed the aside copy'
       curl.exe -fsS -X POST -H "Authorization: Bearer $admin" http://127.0.0.1:7417/clair/ctl/stop
       $daemon.WaitForExit(15000) | Out-Null
+
+      # The scheduled task's shape (ADR 2026-09.pz5g): conhost --headless running
+      # `clair daemon -supervise`. A killed daemon comes back, on the release the self-update
+      # staged; a clean stop ends the supervisor and conhost with exit 0.
+      function Child { Get-CimInstance Win32_Process -Filter "Name='clair.exe'" | Where-Object CommandLine -match '-listen=127\.0\.0\.1:7417' }
+      $sup = Start-Process -FilePath "$env:SystemRoot\System32\conhost.exe" -ArgumentList '--headless', "`"$clair`"", 'daemon', '-supervise', '-listen', '127.0.0.1:7417', '-log-file', "`"$work\supervised.log`"" -PassThru
+      Wait-Answering
+      $first = (Child).ProcessId
+      Check ($first) 'the supervisor started the daemon'
+      Latest 'v0.0.6'
+      $r = Clair update -releases $src
+      Check ($r.Code -eq 0 -and $r.Out -match 'Installed clair v0\.0\.6') 'v0.0.6 staged under the supervisor'
+      Stop-Process -Id $first -Force
+      foreach ($i in 1..80) { $c = Child; if ($c -and $c.ProcessId -ne $first) { break }; Start-Sleep -Milliseconds 250 }
+      Wait-Answering
+      $st = (Clair status -json).Out | ConvertFrom-Json
+      Check ($st.version -eq 'v0.0.6') 'the killed daemon came back, on the staged release'
+      curl.exe -fsS -X POST -H "Authorization: Bearer $admin" http://127.0.0.1:7417/clair/ctl/stop
+      Check ($sup.WaitForExit(20000)) 'a clean stop ended the supervisor and conhost'
+      Check ($sup.ExitCode -eq 0) 'conhost exited 0'
+      Check (-not (Child)) 'no daemon is left'
+      Get-Content "$work\supervised.log" | Select-String 'starting it again|stopped cleanly'
       Stop-Process -Id $server.Id -Force
   after_script:
     # A process left running would hold files the next job's `git clean` must delete.
