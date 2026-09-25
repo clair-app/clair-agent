@@ -63,8 +63,11 @@ linker-injected version.
    hashes the uploaded files into `agent-release.json` and signs them with the offline release
    key. That signature is what every installed agent checks before it updates itself
    (ADR 2026-09.qk6v). Never pin from a local `dist/`. To check an upload, `make dist
-   VERSION=vX.Y.Z` on the tag with the CI image's Go (`golang:1.26`, newest patch): the
-   stamped date is the commit's, so the checksums match `SHA256SUMS.txt`.
+   VERSION=vX.Y.Z` on the tag, in a clean clone, with the CI image's Go (`golang:1.26`,
+   newest patch): the stamped date is the commit's, so the checksums match `SHA256SUMS.txt`.
+   v0.1.0 was built before CI's `.go/` cache was ignored and is stamped `+dirty`; it matches
+   only with CI's `GOPATH`, `GOMODCACHE` and `GOCACHE` pointed at an untracked `.go/` in the
+   clone (golang@sha256:6c2a5538…, Go 1.26.8).
 
 ## Trying the self-update against a local release
 

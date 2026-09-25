@@ -79,7 +79,9 @@ dist: build-all ## build-all for a release: check the stamped version, write dis
 		$$host version | grep -q "^clair $(VERSION) " || \
 		{ echo "dist: $$host reports '$$($$host version)', not $(VERSION)" >&2; exit 1; }; \
 		! $$host version | grep -q "release test key" || \
-		{ echo "dist: $$host was built with a release test key" >&2; exit 1; }
+		{ echo "dist: $$host was built with a release test key" >&2; exit 1; }; \
+		! go version -m $$host | grep -q 'vcs.modified=true' || \
+		{ echo "dist: $$host was built from a modified checkout; git status must be clean" >&2; exit 1; }
 	cd dist && rm -f SHA256SUMS.txt && sha256sum clair-* > SHA256SUMS.txt
 	@cat dist/SHA256SUMS.txt
 

@@ -1,6 +1,9 @@
 # Build outputs. ./bin also holds the pinned tools `make tools` installs.
 /bin/
 /dist/
+# CI's GOPATH, module and build caches (.gitlab-ci.yml). Untracked, they would stamp every
+# CI build vcs.modified=true, and a release "+dirty".
+/.go/
 # A bare `go build ./cmd/clair` drops the binary here.
 /clair
 /clair.exe

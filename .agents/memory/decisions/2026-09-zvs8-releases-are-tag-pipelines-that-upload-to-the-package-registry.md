@@ -46,4 +46,8 @@ permissions, or its deploy can't read the registry. The site still pins hashes f
 registry and never from a local build: a local Go on another patch release builds different
 bytes, and a reproduction is for checking an upload, not for replacing it. Replacing a running `clair.exe` on upgrade is the installer's
 job (it stops the service and renames the old file first). The `release` job is the gate:
-`make dist` fails a tag whose builds report another version.
+`make dist` fails a tag whose builds report another version, or whose Go build info says the
+checkout was modified. Go stamps `vcs.modified` from `git status`, untracked files included:
+v0.1.0 went out as `v0.1.0+dirty` because CI's `GOPATH` (`.go/`, inside the checkout) was not
+ignored, and a clean clone did not reproduce it. `.go/` is ignored since, and `make dist`
+refuses such a build.
