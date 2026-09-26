@@ -144,7 +144,7 @@ func checkFile(path, signer, unsignedDir string) (string, error) {
 	build := filepath.Join(unsignedDir, filepath.Base(path))
 	raw, err := os.ReadFile(build)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("the unsigned build: %w", err)
 	}
 	img, err := parsePE(raw)
 	if err != nil {

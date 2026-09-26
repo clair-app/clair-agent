@@ -203,7 +203,7 @@ func TestCheckAgainstTheUnsignedBuild(t *testing.T) {
 		{"the build it was signed from matches", build(t, fixture(t, "unsigned.exe")), "over the build ", 0},
 		{"another build does not", build(t, other), "covers other bytes than", 1},
 		{"a signed build is not the build before signing", build(t, fixture(t, "signed.exe")), "is signed; -unsigned names", 1},
-		{"a missing build fails", t.TempDir(), "no such file", 1},
+		{"a missing build fails", t.TempDir(), "the unsigned build: ", 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
