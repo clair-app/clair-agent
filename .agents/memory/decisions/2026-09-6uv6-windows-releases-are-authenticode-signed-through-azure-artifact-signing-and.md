@@ -31,6 +31,9 @@ flashed several windows. It looked like the agent spawning something, but it was
 2. **`sign`**: jsign 7.5 (a pinned jar, SHA-256 checked, in `eclipse-temurin:21-jre`) signs
    copies of the two Windows builds.
    - It calls Artifact Signing's API directly, so it needs no Windows machine and no signtool.
+   - It is handed an access token, which the job gets from Entra ID with the client secret.
+     jsign 7.5 takes only a token for `TRUSTEDSIGNING`. The `<tenant>|<client>|<secret>` form
+     in its online docs is from master, and on 7.5 it fails with a 401.
    - It signs with SHA-256 and always adds an RFC 3161 timestamp from
      `timestamp.acs.microsoft.com`. The certificates live three days, so a signature without a
      timestamp is valid at release and invalid by the weekend.

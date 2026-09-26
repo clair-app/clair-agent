@@ -131,9 +131,16 @@ sign:
     - curl -fsSLo jsign.jar "https://github.com/ebourg/jsign/releases/download/$JSIGN_VERSION/jsign-$JSIGN_VERSION.jar"
     - echo "$JSIGN_SHA256  jsign.jar" | sha256sum -c
     - mkdir signed && cp dist/clair-windows-*.exe signed/
+    # jsign 7.5 takes an access token, not the client secret (its online docs describe master), so
+    # the job asks Entra ID for one. The token lives an hour and never reaches the log.
     - |
-      export JSIGN_AZURE="$AZURE_TENANT_ID|$AZURE_CLIENT_ID|$AZURE_CLIENT_SECRET"
-      java -jar jsign.jar --storetype TRUSTEDSIGNING --keystore "$SIGN_ENDPOINT" --storepass env:JSIGN_AZURE \
+      JSIGN_TOKEN=$(curl -fsS "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
+        --data-urlencode grant_type=client_credentials --data-urlencode "client_id=$AZURE_CLIENT_ID" \
+        --data-urlencode "client_secret=$AZURE_CLIENT_SECRET" --data-urlencode scope=https://codesigning.azure.net/.default |
+        sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+      [ -n "$JSIGN_TOKEN" ] || { echo "sign: Entra ID issued no access token" >&2; exit 1; }
+      export JSIGN_TOKEN
+      java -jar jsign.jar --storetype TRUSTEDSIGNING --keystore "$SIGN_ENDPOINT" --storepass env:JSIGN_TOKEN \
         --alias "$SIGN_ALIAS" --alg SHA-256 --tsaurl http://timestamp.acs.microsoft.com --tsmode RFC3161 \
         signed/clair-windows-*.exe
   artifacts:
