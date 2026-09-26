@@ -3,6 +3,7 @@ package pairing
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -18,23 +19,25 @@ type Terminal interface {
 	Confirm(ctx context.Context, prompt string, def bool) (bool, error)
 }
 
-// tty is the controlling terminal.
+// tty is the controlling terminal: in reads the answer, out shows the
+// prompt. They are one file except on Windows.
 type tty struct {
-	f *os.File
+	in, out *os.File
 }
 
 // OpenTerminal opens the controlling terminal, or returns nil when there is
 // none (a service, CI, a pipe on both ends).
 func OpenTerminal() Terminal {
-	f, err := openTTY()
+	in, out, err := openTTY()
 	if err != nil {
 		return nil
 	}
-	if !term.IsTerminal(int(f.Fd())) {
-		_ = f.Close()
+	t := &tty{in: in, out: out}
+	if !term.IsTerminal(int(in.Fd())) || !term.IsTerminal(int(out.Fd())) {
+		_ = t.Close()
 		return nil
 	}
-	return &tty{f: f}
+	return t
 }
 
 // Confirm implements Terminal. The read runs on its own goroutine so a
@@ -44,14 +47,16 @@ func (t *tty) Confirm(ctx context.Context, prompt string, def bool) (bool, error
 	if def {
 		hint = "[Y/n]"
 	}
-	fmt.Fprintf(t.f, "%s %s ", prompt, hint)
+	if _, err := fmt.Fprintf(t.out, "%s %s ", prompt, hint); err != nil {
+		return false, fmt.Errorf("pairing: write terminal: %w", err)
+	}
 	type line struct {
 		text string
 		err  error
 	}
 	got := make(chan line, 1)
 	go func() {
-		text, err := bufio.NewReader(t.f).ReadString('\n')
+		text, err := bufio.NewReader(t.in).ReadString('\n')
 		got <- line{text: text, err: err}
 	}()
 	select {
@@ -66,7 +71,13 @@ func (t *tty) Confirm(ctx context.Context, prompt string, def bool) (bool, error
 }
 
 // Close releases the terminal.
-func (t *tty) Close() error { return t.f.Close() }
+func (t *tty) Close() error {
+	err := t.in.Close()
+	if t.out != t.in {
+		err = errors.Join(err, t.out.Close())
+	}
+	return err
+}
 
 func parseYesNo(text string, def bool) bool {
 	switch strings.ToLower(strings.TrimSpace(text)) {
