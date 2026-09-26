@@ -86,21 +86,99 @@ build:
     paths: [dist/]
     expire_in: 2 weeks
 
-# A release tag (vX.Y.Z) publishes the six builds and their SHA256SUMS.txt to this
-# project's generic package registry, as packages/generic/clair/<tag>/<file>. claircode.app
-# serves them to its installers once its agent-release.json pins their hashes
-# (ADR 2026-09.zvs8); nothing reaches a user from here alone. Built here rather than taken
-# from `build`'s artifacts so the version stamped in is the tag, which `make dist` checks.
-# The registry keeps a re-uploaded file beside the old one; the site's pin catches a change.
-release:
-  extends: .go
+# A release tag (vX.Y.Z) runs dist → sign → signature:windows → release. Built here rather
+# than taken from `build`'s artifacts so the version stamped in is the tag, which `make dist`
+# checks.
+.release-tag:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/
+
+dist:
+  extends: [.go, .release-tag]
   stage: release
   interruptible: false
   before_script: []
-  rules:
-    - if: $CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/
+  script: make dist VERSION="$CI_COMMIT_TAG"
+  artifacts:
+    paths: [dist/]
+    expire_in: 1 week
+
+# Signs copies of the two Windows builds through Azure Artifact Signing, as Jeffrey Mixon
+# (ADR 2026-09.6uv6), with jsign: a Java signer that speaks the service's API, so no Windows
+# machine or signtool is needed. The certificates live three days, so every signature carries
+# an RFC 3161 timestamp or it goes invalid in users' hands. AZURE_TENANT_ID, AZURE_CLIENT_ID and
+# AZURE_CLIENT_SECRET (the signing app registration) are protected variables scoped to
+# the windows-signing environment: only this job, on a protected `v*` tag, can read them. The
+# job hands on only signed/, and `release` checks each file against `dist`'s own build.
+sign:
+  extends: .release-tag
+  stage: release
+  image: eclipse-temurin:21-jre
+  interruptible: false
+  needs: [dist]
+  environment:
+    name: windows-signing
+    action: prepare
+  variables:
+    JSIGN_VERSION: "7.5"
+    JSIGN_SHA256: 602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c
+    SIGN_ENDPOINT: eus.codesigning.azure.net
+    SIGN_ALIAS: $SIGN_ALIAS  # <account>/<certificate profile>
   script:
-    - make dist VERSION="$CI_COMMIT_TAG"
+    - |
+      [ -n "$AZURE_TENANT_ID" ] && [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ] || {
+        echo "sign: no AZURE_* variables here; they reach only a protected v* tag (ADR 2026-09.6uv6)" >&2; exit 1; }
+    - curl -fsSLo jsign.jar "https://github.com/ebourg/jsign/releases/download/$JSIGN_VERSION/jsign-$JSIGN_VERSION.jar"
+    - echo "$JSIGN_SHA256  jsign.jar" | sha256sum -c
+    - mkdir signed && cp dist/clair-windows-*.exe signed/
+    - |
+      export JSIGN_AZURE="$AZURE_TENANT_ID|$AZURE_CLIENT_ID|$AZURE_CLIENT_SECRET"
+      java -jar jsign.jar --storetype TRUSTEDSIGNING --keystore "$SIGN_ENDPOINT" --storepass env:JSIGN_AZURE \
+        --alias "$SIGN_ALIAS" --alg SHA-256 --tsaurl http://timestamp.acs.microsoft.com --tsmode RFC3161 \
+        signed/clair-windows-*.exe
+  artifacts:
+    paths: [signed/]
+    expire_in: 1 week
+
+# Windows' own verdict on the signed builds, which `tools/authenticode` does not give: the
+# chain to a root Windows trusts. Then the build for this runner must still run and report
+# the tag.
+signature:windows:
+  extends: .release-tag
+  stage: release
+  tags: [windows]
+  interruptible: false
+  needs: [sign]
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - |
+      $ErrorActionPreference = 'Stop'
+      foreach ($f in Get-ChildItem 'signed\clair-windows-*.exe') {
+        $s = Get-AuthenticodeSignature -LiteralPath $f.FullName
+        Write-Host "$($f.Name): $($s.Status); $($s.SignerCertificate.Subject); timestamped by $($s.TimeStamperCertificate.Subject)"
+        if ($s.Status -ne 'Valid') { throw "$($f.Name): $($s.Status): $($s.StatusMessage)" }
+        if ($s.SignerCertificate.Subject -notlike 'CN=Jeffrey Mixon,*') { throw "$($f.Name) is not signed by Jeffrey Mixon" }
+        if (-not $s.TimeStamperCertificate) { throw "$($f.Name) is not timestamped" }
+      }
+      $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
+      $said = & "signed\clair-windows-$arch.exe" version
+      Write-Host $said
+      if ($said -notlike "clair $env:CI_COMMIT_TAG *") { throw "clair-windows-$arch.exe reports '$said', not $env:CI_COMMIT_TAG" }
+
+# Publishes the six builds and their SHA256SUMS.txt to this project's generic package registry,
+# as packages/generic/clair/<tag>/<file>. claircode.app serves them to its installers once its
+# agent-release.json pins their hashes (ADR 2026-09.zvs8); nothing reaches a user from here
+# alone. The Windows builds are the signed ones, and the checksums are over their signed bytes.
+# The registry keeps a re-uploaded file beside the old one; the site's pin catches a change.
+release:
+  extends: [.go, .release-tag]
+  stage: release
+  interruptible: false
+  before_script: []
+  needs: [dist, sign, "signature:windows"]
+  script:
+    - make dist-signed SIGNED=signed
     - |
       base="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/clair/$CI_COMMIT_TAG"
       for f in dist/clair-* dist/SHA256SUMS.txt; do

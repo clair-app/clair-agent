@@ -11,8 +11,8 @@ ADR 2026-09.kau2; the design constraints come from `RELAY.md` (see `context/desi
 - Everything else is under `internal/` — this module exposes no importable API, and the
   compiler enforces it. One package per concern, named for what it holds (`relay`,
   `tunnel`, `pairing`), never `util`, `common` or `helpers`.
-- `tools/` holds developer tools; they are `go run`, never shipped. `tools/adr` and
-  `tools/machocheck` are stdlib-only; `tools/phonesim` and `tools/relaysim` may import `internal/` and
+- `tools/` holds developer tools; they are `go run`, never shipped. `tools/adr`,
+  `tools/machocheck` and `tools/authenticode` are stdlib-only; `tools/phonesim` and `tools/relaysim` may import `internal/` and
   `golang.org/x`, because they *are* the far end of the protocol; `tools/releasesign` imports
   `internal/update`, so it signs exactly what the agent verifies.
 - The binary on disk can be newer than the running daemon, by any number of releases, after a

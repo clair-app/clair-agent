@@ -82,6 +82,25 @@ dist: build-all ## build-all for a release: check the stamped version, write dis
 		{ echo "dist: $$host was built with a release test key" >&2; exit 1; }; \
 		! go version -m $$host | grep -q 'vcs.modified=true' || \
 		{ echo "dist: $$host was built from a modified checkout; git status must be clean" >&2; exit 1; }
+	@$(MAKE) --no-print-directory sums
+
+# The Windows builds go out Authenticode-signed (ADR 2026-09.6uv6). CI's `sign` job signs
+# copies of dist/'s builds; `make dist-signed SIGNED=<dir>` then refuses any copy that is not
+# dist/'s own build plus a timestamped signature by SIGNER, puts the rest in dist/, and writes
+# the checksums again over the signed bytes. `authenticode digest` compares a signed release
+# with a local `make dist`.
+SIGNER         := Jeffrey Mixon
+WINDOWS_BUILDS := $(patsubst windows/%,clair-windows-%.exe,$(filter windows/%,$(PLATFORMS)))
+
+.PHONY: dist-signed
+dist-signed: ## After dist: check the signed Windows builds in SIGNED=<dir>, swap them into dist/, rewrite the checksums
+	@[ -n "$(SIGNED)" ] || { echo "dist-signed: SIGNED=<directory of signed Windows builds> is required" >&2; exit 1; }
+	go run ./tools/authenticode check -signer '$(SIGNER)' -unsigned dist $(addprefix $(SIGNED)/,$(WINDOWS_BUILDS))
+	cp $(addprefix $(SIGNED)/,$(WINDOWS_BUILDS)) dist/
+	@$(MAKE) --no-print-directory sums
+
+.PHONY: sums
+sums: ## Write dist/SHA256SUMS.txt over the builds in dist/
 	cd dist && rm -f SHA256SUMS.txt && sha256sum clair-* > SHA256SUMS.txt
 	@cat dist/SHA256SUMS.txt
 

@@ -74,7 +74,9 @@ Stages `check` → `build`; jobs `adr-index`, `format`, `lint`, `test` (coverage
 from `go tool cover -func`), `vuln` (allow_failure: advisory until the agent handles keys)
 and `build` (host binary, `clair version`, then `make build-all` as artifacts, which ends
 with `tools/machocheck` verifying the darwin builds' code signatures). A `vX.Y.Z` tag
-adds `release`: `make dist` and an upload to the generic package registry (ADR 2026-09.zvs8). Module and
+adds `dist` → `sign` → `signature:windows` → `release`: `make dist`, the Windows builds signed with
+jsign through Azure Artifact Signing (a pinned jar in `eclipse-temurin:21-jre`), checked by Windows,
+then `make dist-signed` and an upload to the generic package registry (ADRs 2026-09.zvs8, 2026-09.6uv6). Module and
 build caches plus `./bin` are cached on `go.sum` + `Makefile`. Runs on merge requests, the
 default branch and tags.
 

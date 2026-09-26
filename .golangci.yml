@@ -136,9 +136,10 @@ linters:
           strict: false
     misspell:
       locale: UK
-      # The last two are wire formats, not prose: the relay's 401 body says
-      # `"error":"unauthorized"` and Claude Code's hook output says `"behavior"`.
-      ignore-rules: [analyze, analyzer, initialize, serialize, serialization, marshal, marshaling, unmarshal, unmarshaling, color, unauthorized, behavior]
+      # The rest are names, not prose: the relay's 401 body says `"error":"unauthorized"`,
+      # Claude Code's hook output says `"behavior"`, encoding/asn1's struct tag is
+      # `generalized`, and Azure's signing service is Artifact Signing.
+      ignore-rules: [analyze, analyzer, initialize, serialize, serialization, marshal, marshaling, unmarshal, unmarshaling, color, unauthorized, behavior, generalized, artifact]
     nolintlint:
       require-explanation: true
       require-specific: true
