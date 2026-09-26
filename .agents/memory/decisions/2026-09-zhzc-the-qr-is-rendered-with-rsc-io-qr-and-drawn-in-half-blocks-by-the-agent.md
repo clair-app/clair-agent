@@ -25,7 +25,9 @@ agent draws it: two modules per character with `▀ ▄ █` (23 lines for versi
 two-module quiet zone, which fits an 80×24 terminal, over SSH too), `--qr=ascii` for a terminal
 without UTF-8, `--qr=none` to print the link only, and `--invert` for a light background. The
 default draws light modules as blocks, which is what a dark terminal wants; scanners read both
-polarities. On Windows the default is ASCII unless `WT_SESSION` says Windows Terminal. The
+polarities. On Windows the default is ASCII only when stdout is a pipe or a file outside
+Windows Terminal: a console is written in UTF-16 whatever its code page, and `WT_SESSION` alone
+missed the console Windows 11 hands to Windows Terminal as the default terminal. The
 alternative — `github.com/skip2/go-qrcode` — is equally fine and more used; `rsc.io/qr` was
 chosen for its size and pedigree. The in-house encoder was not taken because a QR that fails to
 scan is diagnosed by a phone, not a test.

@@ -304,3 +304,36 @@ func TestPairInstallsThePhonesHooks(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultQRMode(t *testing.T) {
+	t.Parallel()
+
+	env := func(wt string) func(string) string {
+		return func(key string) string {
+			if key == "WT_SESSION" {
+				return wt
+			}
+			return ""
+		}
+	}
+	tests := []struct {
+		name    string
+		goos    string
+		wt      string
+		console bool
+		want    pairing.QRMode
+	}{
+		{name: "linux piped", goos: "linux", want: pairing.QRUnicode},
+		{name: "windows console handed to Windows Terminal", goos: "windows", console: true, want: pairing.QRUnicode},
+		{name: "windows piped inside Windows Terminal", goos: "windows", wt: "0f1e", want: pairing.QRUnicode},
+		{name: "windows piped", goos: "windows", want: pairing.QRASCII},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := defaultQRMode(tt.goos, env(tt.wt), tt.console); got != tt.want {
+				t.Errorf("defaultQRMode(%q, WT_SESSION=%q, console=%v) = %q, want %q", tt.goos, tt.wt, tt.console, got, tt.want)
+			}
+		})
+	}
+}

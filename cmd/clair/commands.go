@@ -10,8 +10,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"time"
+
+	"golang.org/x/term"
 
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/hookserver"
@@ -57,13 +58,22 @@ func controlClient(agent state.Agent) *ctl.Client {
 	return &ctl.Client{Base: "http://" + listen, AdminToken: agent.AdminToken}
 }
 
-// defaultQRMode picks half-blocks, except on a Windows console that is not
-// Windows Terminal, where UTF-8 output is not a given.
-func defaultQRMode(getenv func(string) string) pairing.QRMode {
-	if runtime.GOOS == "windows" && getenv("WT_SESSION") == "" {
+// defaultQRMode picks half-blocks, except on Windows when stdout is a pipe
+// or a file, where the reader may decode it in the OEM code page. A console
+// is written in UTF-16, whatever its code page, so it gets half-blocks; so
+// does Windows Terminal, though WT_SESSION is missing from a console it was
+// handed as the default terminal, an elevated one included.
+func defaultQRMode(goos string, getenv func(string) string, console bool) pairing.QRMode {
+	if goos == "windows" && !console && getenv("WT_SESSION") == "" {
 		return pairing.QRASCII
 	}
 	return pairing.QRUnicode
+}
+
+// isConsole reports whether w is a terminal.
+func isConsole(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
 }
 
 func cmdPair(ctx context.Context, d deps, args []string, stdout, stderr io.Writer) int {
@@ -73,7 +83,7 @@ func cmdPair(ctx context.Context, d deps, args []string, stdout, stderr io.Write
 	cfg.register(fs)
 	var rf relayFlags
 	rf.register(fs)
-	qrMode := fs.String("qr", string(defaultQRMode(d.getenv)), "how to draw the QR: unicode, ascii or none")
+	qrMode := fs.String("qr", string(defaultQRMode(d.goos, d.getenv, isConsole(stdout))), "how to draw the QR: unicode, ascii or none")
 	invert := fs.Bool("invert", false, "draw the QR for a light terminal background")
 	replace := fs.Bool("replace", false, "replace an existing pair without asking (new keys on both sides)")
 	yes := fs.Bool("yes", false, "do not ask before pairing with the phone that completed the code")
