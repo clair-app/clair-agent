@@ -70,6 +70,11 @@ const (
 	// (RELAY.md §4.3, draft): a change is reported to the phone, and a
 	// bubbled decide is released once someone is at a terminal.
 	presencePoll = 10 * time.Second
+	// A held decide ends holdMargin before its timeout, so the agent answers
+	// before Claude Code's own timer — started before the request arrived —
+	// closes the socket, and can tell the phone it expired (draft). The
+	// shortest timeout, record.MinDecideTimeout, still holds for 3 s.
+	holdMargin = 2 * time.Second
 )
 
 // ErrNoPair is returned by Enqueue when nothing is paired; the hook is still
@@ -287,7 +292,8 @@ func (t *Tunnel) Enqueue(req record.Record, hook record.Hook) error {
 }
 
 // Hold satisfies hookserver.Sink for decides: the record is queued as `now`
-// and the call waits for a response record, the timeout, or the client.
+// and the call waits for a response record, the client, or the timeout less
+// holdMargin — then the phone is told the decide expired.
 // A bubbled decide is the exception (RELAY.md §4.3): Claude Code draws it in
 // the terminal only once this returns without a decision, so while someone
 // is at a terminal it is not held at all — the phone gets the request and a
@@ -333,7 +339,7 @@ func (t *Tunnel) Hold(ctx context.Context, req record.Record, hook record.Hook, 
 	}
 	t.watch(h, sample.Present(threshold), sample.Known)
 	defer t.unwatch(h)
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(timeout - holdMargin)
 	defer timer.Stop()
 	select {
 	case a := <-h.ch:
@@ -345,6 +351,9 @@ func (t *Tunnel) Hold(ctx context.Context, req record.Record, hook record.Hook, 
 		return a.resp, a.ok, nil
 	case <-timer.C:
 		unregister()
+		// Nobody answered: the prompt stays open in the terminal, and the
+		// phone expires the action rather than calling it handled there.
+		cancelAll(pairs, req.ReqID, record.CancelTimeout)
 		t.log.Info("decide expired", "req_id", req.ReqID, "timeout_s", int64(timeout/time.Second))
 		return record.Record{}, false, nil
 	case <-ctx.Done():

@@ -64,6 +64,9 @@ const (
 	CancelTerminal = "terminal"
 	// CancelStop: the agent is stopping; `reset` follows on the next start.
 	CancelStop = "stop"
+	// CancelTimeout: the decide's timeout ran out before anyone answered;
+	// the prompt is still open in the terminal.
+	CancelTimeout = "timeout"
 )
 
 // Kind discriminates the three record shapes.

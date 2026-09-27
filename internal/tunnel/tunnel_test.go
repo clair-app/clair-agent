@@ -567,8 +567,14 @@ func TestHoldExpiresAtTheDeadline(t *testing.T) {
 		if err != nil || ok {
 			t.Fatalf("Hold = ok %v, err %v; want no decision", ok, err)
 		}
-		if elapsed := time.Since(start); elapsed != 5*time.Second {
-			t.Errorf("Hold returned after %v, want the 5s deadline", elapsed)
+		if elapsed := time.Since(start); elapsed != 5*time.Second-holdMargin {
+			t.Errorf("Hold returned after %v, want the 5s timeout less the margin", elapsed)
+		}
+		// The phone is told the decide expired, not that the terminal took it.
+		synctest.Wait()
+		recs, _ := records(t, h)
+		if c := recs[len(recs)-1]; c.Control != record.ControlCancel || c.ReqID != "01ARYZ6S41TSV4RRFFQ69G5FAV" || c.Reason != record.CancelTimeout {
+			t.Errorf("last record = %+v, want cancel (timeout) for the decide", c)
 		}
 	})
 }

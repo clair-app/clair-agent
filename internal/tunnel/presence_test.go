@@ -351,5 +351,14 @@ func TestIdleIsStampedOnEveryRequestAndCancelsCarryTheirReason(t *testing.T) {
 		if c := recs[len(recs)-1]; c.Control != record.ControlCancel || c.Reason != record.CancelStop {
 			t.Errorf("cancel on drain = %+v, want reason stop", c)
 		}
+		// A timeout's cancel says the decide expired.
+		if _, ok, err := h.tun.Hold(t.Context(), decide("01ARYZ6S41TSV4RRFFQ69G5FAX"), event("PermissionRequest"), record.MinDecideTimeout); ok || err != nil {
+			t.Fatalf("Hold to its timeout = ok %v, err %v", ok, err)
+		}
+		synctest.Wait()
+		recs, _ = records(t, h)
+		if c := recs[len(recs)-1]; c.Control != record.ControlCancel || c.Reason != record.CancelTimeout {
+			t.Errorf("cancel on timeout = %+v, want reason timeout", c)
+		}
 	})
 }
