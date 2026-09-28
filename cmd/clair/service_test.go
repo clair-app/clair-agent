@@ -161,8 +161,8 @@ func (s *systemctl) run(ctx context.Context, name string, args ...string) (servi
 	return service.Result{}, nil
 }
 
-// freeAgent writes an agent.json on a loopback port nothing listens on.
-func freeAgent(t *testing.T, dir string) state.Agent {
+// freeAddr is a loopback address nothing listens on.
+func freeAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
@@ -170,11 +170,17 @@ func freeAgent(t *testing.T, dir string) state.Agent {
 	}
 	addr := ln.Addr().String()
 	_ = ln.Close()
+	return addr
+}
+
+// freeAgent writes an agent.json on a loopback port nothing listens on.
+func freeAgent(t *testing.T, dir string) state.Agent {
+	t.Helper()
 	d, err := state.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, _, err := d.EnsureAgent(testDeps(nil).entropy, state.Agent{Listen: addr, Relay: "https://relay.test", LogLevel: "info"})
+	agent, _, err := d.EnsureAgent(testDeps(nil).entropy, state.Agent{Listen: freeAddr(t), Relay: "https://relay.test", LogLevel: "info"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +234,25 @@ func TestServiceLifecycle(t *testing.T) {
 	if out := step(exitOK, "uninstall"); !strings.Contains(out, "not installed") {
 		t.Errorf("a second uninstall said:\n%s", out)
 	}
+}
+
+// A first install writes agent.json, and with it the admin token the
+// readiness check must present: `curl | sh` on a new machine.
+func TestServiceInstallOnANewMachine(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "clair")
+	fake := &systemctl{t: t, dir: dir}
+	d := serviceDeps(t, "linux", fake.run)
+	d.listen = freeAddr(t)
+	var stdout, stderr bytes.Buffer
+	if got := runWith(t.Context(), d, []string{"service", "install", "-config-dir", dir}, &stdout, &stderr); got != exitOK || !strings.Contains(stdout.String(), "is running: clair") {
+		t.Errorf("install = %d; stdout %q, stderr %q", got, stdout.String(), stderr.String())
+	}
+	if agent, ok := readAgent(dir); !ok || agent.Listen != d.listen || agent.AdminToken == "" {
+		t.Errorf("agent.json = %+v, %v; want one on %s with an admin token", agent, ok, d.listen)
+	}
+	runWith(t.Context(), d, []string{"service", "uninstall", "-config-dir", dir}, &bytes.Buffer{}, &bytes.Buffer{})
 }
 
 func TestServiceInstallRefusesWhileATerminalDaemonAnswers(t *testing.T) {

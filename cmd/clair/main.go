@@ -89,6 +89,18 @@ type deps struct {
 	// spawn starts a daemon for `clair daemon -supervise`; nil runs this
 	// binary.
 	spawn func(ctx context.Context, exe string, args []string, stderr io.Writer) (supervisor.Child, error)
+	// listen is the loopback a new agent.json names; empty is
+	// hookserver.ListenDefault.
+	listen string
+}
+
+// newAgent is the agent.json a command writes when there is none yet.
+func (d deps) newAgent() state.Agent {
+	listen := d.listen
+	if listen == "" {
+		listen = hookserver.ListenDefault
+	}
+	return state.Agent{Listen: listen, Relay: relay.DefaultBaseURL, LogLevel: "info"}
 }
 
 func main() {
@@ -282,7 +294,7 @@ func cmdDaemon(ctx context.Context, d deps, args []string, stderr io.Writer) int
 		defer func() { _ = lf.Close() }()
 		stderr = lf
 	}
-	dir, agent, err := openConfig(d, cfg, state.Agent{Listen: hookserver.ListenDefault, Relay: relay.DefaultBaseURL, LogLevel: "info"})
+	dir, agent, err := openConfig(d, cfg, d.newAgent())
 	if err != nil {
 		fmt.Fprintf(stderr, "clair daemon: %v\n", err)
 		return exitError

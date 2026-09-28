@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"claircode.app/clair-agent/internal/ctl"
-	"claircode.app/clair-agent/internal/hookserver"
-	"claircode.app/clair-agent/internal/relay"
 	"claircode.app/clair-agent/internal/service"
 	"claircode.app/clair-agent/internal/state"
 )
@@ -93,7 +91,7 @@ func cmdService(ctx context.Context, d deps, args []string, stdout, stderr io.Wr
 	}
 	// agent.json names the loopback and the admin token; without one the
 	// defaults stand in, and nothing answers them.
-	agent := state.Agent{Listen: hookserver.ListenDefault}
+	agent := state.Agent{Listen: d.newAgent().Listen}
 	if a, ok := readAgent(dirPath); ok && a.Listen != "" {
 		agent = a
 	}
@@ -186,10 +184,14 @@ func (s serviceCmd) install(ctx context.Context, d deps, dirPath, relayCA string
 	}
 
 	// The daemon reads agent.json when it starts; make it exist, with the
-	// defaults `clair daemon` would write.
-	if _, _, err = openConfig(d, configFlags{dir: dirPath}, state.Agent{Listen: hookserver.ListenDefault, Relay: relay.DefaultBaseURL, LogLevel: "info"}); err != nil {
+	// defaults `clair daemon` would write. On a first install that mints the
+	// admin token, so the control client (the manager's too) is rebuilt from
+	// it: the one read before would be refused until ready gave up.
+	_, agent, err := openConfig(d, configFlags{dir: dirPath}, d.newAgent())
+	if err != nil {
 		return s.fail(err)
 	}
+	*s.control = *controlClient(agent)
 	before, err := s.m.State(ctx)
 	if err != nil {
 		return s.fail(err)

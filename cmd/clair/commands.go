@@ -102,7 +102,7 @@ func cmdPair(ctx context.Context, d deps, args []string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "clair pair: -qr must be unicode, ascii or none\n")
 		return exitUsage
 	}
-	dir, agent, err := openConfig(d, cfg, state.Agent{Listen: hookserver.ListenDefault, Relay: relay.DefaultBaseURL, LogLevel: "info"})
+	dir, agent, err := openConfig(d, cfg, d.newAgent())
 	if err != nil {
 		fmt.Fprintf(stderr, "clair pair: %v\n", err)
 		return exitError
@@ -166,7 +166,7 @@ func cmdUnpair(ctx context.Context, d deps, args []string, stdout, stderr io.Wri
 		}
 		return exitUsage
 	}
-	dir, agent, err := openConfig(d, cfg, state.Agent{Listen: hookserver.ListenDefault, Relay: relay.DefaultBaseURL, LogLevel: "info"})
+	dir, agent, err := openConfig(d, cfg, d.newAgent())
 	if err != nil {
 		fmt.Fprintf(stderr, "clair unpair: %v\n", err)
 		return exitError
