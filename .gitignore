@@ -4,6 +4,8 @@
 # CI's GOPATH, module and build caches (.gitlab-ci.yml). Untracked, they would stamp every
 # CI build vcs.modified=true, and a release "+dirty".
 /.go/
+# The macos job's scratch space and log artifact (.gitlab-ci.yml); untracked too, for the same reason.
+/.mac/
 # A bare `go build ./cmd/clair` drops the binary here.
 /clair
 /clair.exe

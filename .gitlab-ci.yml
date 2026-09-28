@@ -98,6 +98,9 @@ dist:
   stage: release
   interruptible: false
   before_script: []
+  # No earlier job's artifacts: `make dist` builds everything itself and refuses a checkout
+  # any untracked file makes "modified".
+  dependencies: []
   script: make dist VERSION="$CI_COMMIT_TAG"
   artifacts:
     paths: [dist/]
