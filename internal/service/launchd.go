@@ -15,8 +15,10 @@ import (
 // launchd is a LaunchAgent in the user's GUI domain: loaded at login, run as
 // the user, with terminal input idle readable from /dev/ttys*.
 //
-// Unverified on hardware: written from launchd.plist(5) and launchctl(1),
-// tested here against a fake launchctl (ADR 2026-09.ahq8).
+// Written from launchd.plist(5) and launchctl(1) and tested here against a
+// fake launchctl (ADR 2026-09.ahq8); run on a Mac mini (macOS 27) on
+// 2026-09-27: bootstrap, kickstart -k, bootout, KeepAlive after a SIGKILL, a
+// clean stop staying down, a reboot, and one Background Items entry.
 type launchd struct {
 	env    Env
 	path   string

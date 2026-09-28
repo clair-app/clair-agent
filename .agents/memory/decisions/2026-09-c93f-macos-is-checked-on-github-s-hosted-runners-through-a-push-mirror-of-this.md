@@ -8,7 +8,7 @@ topics: [ci, macos, daemon, install]
 
 # ADR 2026-09.c93f — macOS is checked on GitHub's hosted runners through a push mirror of this project
 
-Status: Accepted (2026-09-24)
+Status: Accepted (2026-09-24); superseded by ADR 2026-09.tbsh (the macOS job runs on the Mac mini instance runner, and the workflow is removed)
 
 **What was observed.** On 2026-09-24 no Mac was at hand, and nothing macOS-specific had ever
 run. The darwin builds cross-compiled, but the `_darwin.go` tests had never executed, and the

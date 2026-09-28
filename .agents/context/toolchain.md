@@ -80,10 +80,14 @@ then `make dist-signed` and an upload to the generic package registry (ADRs 2026
 build caches plus `./bin` are cached on `go.sum` + `Makefile`. Runs on merge requests, the
 default branch and tags.
 
-GitLab has no macOS runner, so `.github/workflows/macos.yml` runs on
-`github.com/clair-app/clair-agent`, a private push mirror of this project (GitLab a remote mirror,
-over SSH with a deploy key). It runs `make test` on darwin, the LaunchAgent for real, and
-claircode.app's `install.sh`. Push to GitLab, never to the mirror; results show on GitHub only.
+The `macos` job runs on the instance runner tagged `macos`: a Mac mini (Apple M6, macOS 27), the
+shell executor, bash, as the Mac's own user inside its GUI login (ADR 2026-09.tbsh).
+
+- It fetches go.dev's Go 1.26 (SHA-256 checked) into `$CI_BUILDS_DIR/.clair-tools`.
+- It runs `make test` with the race detector, the LaunchAgent for real, presence from a pty,
+  claircode.app's `install.sh` and the self-update.
+- It refuses to run while a real clair agent is installed on that Mac, and its own processes
+  run from the checkout by absolute path so `after_script` can kill them.
 
 The `windows` job runs on the instance runner tagged `windows`: Windows 11, the shell executor,
 pwsh, as SYSTEM in session 0 (ADR 2026-09.6w38).

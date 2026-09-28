@@ -359,3 +359,270 @@ windows:
       $root = (Resolve-Path $env:CI_PROJECT_DIR).Path
       Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue
       Get-Content "$root\self-update\daemon.log" -ErrorAction SilentlyContinue | Select-Object -Last 40
+
+# macOS, on the instance runner tagged `macos`: a Mac mini (Apple M6, macOS 27), shell executor,
+# bash, run by the Mac's own user inside its GUI login (ADR 2026-09.tbsh). So gui/<uid> is a live
+# launchd domain, and the job drives the LaunchAgent for real (ADR 2026-09.ahq8):
+#
+# - `make test` on darwin, with the race detector (Xcode's clang is there).
+# - codesign and tools/machocheck agree on the build's signature.
+# - install, pair through tools/relaysim and tools/phonesim, answer a decide, presence from a
+#   keystroke read at a pty, SIGKILL and see KeepAlive restart it, stop it through
+#   /clair/ctl/stop and see it stay down, uninstall.
+# - claircode.app's install.sh under /bin/sh against a release of this commit on 127.0.0.1: a
+#   first install with no config, an upgrade over the running service, a shell under Rosetta.
+# - the self-update (ADR 2026-09.qk6v) with a key made for the run: a running LaunchAgent's
+#   binary replaced, codesign-valid and unquarantined, a restart onto it, a tampered and a
+#   foreign-key release refused.
+#
+# The Mac is also someone's machine. There is one LaunchAgent label per user, so the job refuses
+# to run while a real clair agent is installed there, and it keeps its own daemon, relay and
+# release servers off the ports a real agent uses — except install.sh's first install, which is a
+# user's first install and so takes 127.0.0.1:7317. Each install shows "Background Items Added"
+# on the Mac's screen. Go and its caches persist under $CI_BUILDS_DIR/.clair-tools. The runner's
+# PATH is launchd's, so Homebrew's bin is added for jq.
+macos:
+  stage: check
+  tags: [macos]
+  interruptible: true
+  timeout: 20m
+  resource_group: mac-mini   # one LaunchAgent label, fixed ports
+  variables:
+    LABEL: app.claircode.clair
+    HOOK: http://127.0.0.1:17317
+    RELAY: http://127.0.0.1:13000
+  rules:
+    - changes: [cmd/**/*, internal/**/*, tools/**/*, go.mod, go.sum, Makefile, .gitlab-ci.yml]
+  before_script:
+    - |
+      export PATH="/opt/homebrew/bin:$PATH"
+      command -v jq > /dev/null || { echo "macos: no jq on this Mac (brew install jq)"; exit 1; }
+      [ "$(uname -m)" = arm64 ] || { echo "macos: the job fetches Go for arm64, and this is $(uname -m)"; exit 1; }
+      tools="$CI_BUILDS_DIR/.clair-tools"
+      dl=$(curl -fsS 'https://go.dev/dl/?mode=json')
+      go=$(jq -r '[.[] | select(.stable and (.version | startswith("go1.26.")))][0].version // empty' <<< "$dl")
+      [ -n "$go" ] || { echo "macos: go.dev lists no stable Go 1.26"; exit 1; }
+      if [ ! -x "$tools/$go/go/bin/go" ]; then
+        file="$go.darwin-arm64.tar.gz"
+        sum=$(jq -r --arg f "$file" '.[].files[] | select(.filename == $f) | .sha256' <<< "$dl")
+        mkdir -p "$tools"
+        curl -fsSLo "$tools/$file" "https://go.dev/dl/$file"
+        echo "$sum  $tools/$file" | shasum -a 256 -c
+        rm -rf "$tools/$go.part" && mkdir "$tools/$go.part"
+        tar -xzf "$tools/$file" -C "$tools/$go.part"
+        mv "$tools/$go.part" "$tools/$go"
+        rm "$tools/$file"
+      fi
+      export PATH="$tools/$go/go/bin:$PATH" GOPATH="$tools/gopath" GOMODCACHE="$tools/gomod" GOCACHE="$tools/gocache"
+      go version
+    - |
+      plist="$HOME/Library/LaunchAgents/$LABEL.plist"
+      if [ -e "$plist" ]; then
+        prog=$(plutil -extract ProgramArguments.0 raw -o - "$plist")
+        case "$prog" in
+        "$CI_BUILDS_DIR"/*) echo "macos: removing the LaunchAgent a cancelled run left"; launchctl bootout "gui/$(id -u)/$LABEL" 2> /dev/null || true; rm -f "$plist" ;;
+        *) echo "macos: $plist runs $prog, a real clair agent, which this job would replace"; exit 1 ;;
+        esac
+      fi
+      for port in 7317 13000 17317 18000 18001; do
+        if nc -z 127.0.0.1 "$port" 2> /dev/null; then echo "macos: something already listens on 127.0.0.1:$port"; exit 1; fi
+      done
+  script:
+    - make test
+    # codesign is Apple's own verifier: where it and tools/machocheck disagree, the checker that
+    # guards the Linux-built releases is wrong.
+    - |
+      make build
+      bin/clair version
+      codesign --verify --strict --verbose=2 bin/clair
+      go run ./tools/machocheck bin/clair
+      for t in relaysim phonesim releasesign; do go build -o "bin/$t" "./tools/$t"; done
+    - |
+      W="$CI_PROJECT_DIR/.mac"
+      B="$CI_PROJECT_DIR/bin" # what runs in the background runs by this path, which after_script kills
+      mkdir -p "$W/logs"
+      export CLAIR_CONFIG_DIR="$W/clair" CLAUDE_CONFIG_DIR="$W/claude"
+      TARGET="gui/$(id -u)/$LABEL"
+      # Readers that stop early would SIGPIPE launchctl, and pipefail is on.
+      pid() { launchctl print "$TARGET" | awk '$1 == "pid" && !seen { print $3; seen = 1 }'; }
+      answering() { for _ in $(seq 40); do "$1" status > /dev/null 2>&1 && return 0; sleep 0.25; done; return 1; }
+      listening() { for _ in $(seq 40); do nc -z 127.0.0.1 "$1" 2> /dev/null && return 0; sleep 0.25; done; return 1; }
+      decide() {
+        curl -sS --fail-with-body -X POST -H "Authorization: Bearer $(jq -r .token "$CLAIR_CONFIG_DIR/agent.json")" \
+          --data '{"session_id":"ci","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}' \
+          "$HOOK/clair/v1/hook/decide?timeout=30"
+      }
+      nohup "$B/relaysim" -listen 127.0.0.1:13000 > "$W/logs/relaysim.log" 2>&1 &
+      listening 13000 || { cat "$W/logs/relaysim.log"; exit 1; }
+    # The relay and the loopback live in agent.json, which `clair daemon -relay -listen` writes.
+    - |
+      "$B/clair" daemon -listen 127.0.0.1:17317 -relay "$RELAY" > "$W/logs/daemon-once.log" 2>&1 &
+      once=$!
+      answering bin/clair || { cat "$W/logs/daemon-once.log"; exit 1; }
+      kill "$once"
+      wait "$once" || true
+      jq -e --arg r "$RELAY" '.relay == $r and .listen == "127.0.0.1:17317"' "$CLAIR_CONFIG_DIR/agent.json"
+    - |
+      echo "--- install the LaunchAgent"
+      bin/clair service install
+      bin/clair service status
+      launchctl print "$TARGET" | sed -n 1,40p
+      sudo -n sfltool dumpbtm 2> /dev/null | grep -B2 -A9 'Name: clair$' || echo "(no Background Items entry named clair yet; informational)"
+    - |
+      echo "--- pair through phonesim"
+      "$B/clair" pair -qr none > "$W/logs/pair.log" 2>&1 &
+      pair=$!
+      link=
+      for _ in $(seq 40); do
+        link=$(grep -oE 'http://127\.0\.0\.1:13000/p#[A-Za-z0-9_-]+' "$W/logs/pair.log" | head -1) || true
+        [ -n "$link" ] && break
+        sleep 0.25
+      done
+      [ -n "$link" ] || { cat "$W/logs/pair.log"; exit 1; }
+      nohup "$B/phonesim" -v "$link" > "$W/logs/phonesim.log" 2>&1 &
+      for _ in $(seq 120); do kill -0 "$pair" 2> /dev/null || break; sleep 0.25; done
+      if kill -0 "$pair" 2> /dev/null; then echo "clair pair did not finish"; cat "$W/logs/pair.log"; exit 1; fi
+      wait "$pair"
+      cat "$W/logs/pair.log"
+      bin/clair status
+    - |
+      echo "--- the phone answers a decide"
+      out=$(decide)
+      echo "$out"
+      jq -e '.hookSpecificOutput.decision.behavior == "allow"' <<< "$out"
+    # A keystroke read at a pty of this user's is presence (ADR 2026-09.34qh); script(1) makes the
+    # pty, and the daemon, under launchd, must see it within a second or two.
+    - |
+      echo "--- presence from a keystroke read at a pty"
+      printf 'x\n' | script -q /dev/null sh -c "read l; bin/clair status -json > '$W/presence.json'" > /dev/null
+      jq '.presence' "$W/presence.json"
+      jq -e '.presence.source == "pty" and .presence.idleMs < 3000' "$W/presence.json"
+    - |
+      echo "--- KeepAlive restarts a killed daemon, which picks its pair up again"
+      before=$(pid)
+      launchctl kill SIGKILL "$TARGET"
+      after=
+      for _ in $(seq 120); do
+        after=$(pid)
+        [ -n "$after" ] && [ "$after" != "$before" ] && break
+        sleep 0.25
+      done
+      echo "pid $before, then ${after:-none}"
+      [ -n "$after" ] && [ "$after" != "$before" ]
+      answering bin/clair
+      jq -e '.hookSpecificOutput.decision.behavior == "allow"' <<< "$(decide)"
+    # SuccessfulExit false: a clean exit is not a failure, so nothing restarts it.
+    - |
+      echo "--- a daemon stopped through /clair/ctl/stop stays down"
+      curl -sS --fail-with-body -X POST -H "Authorization: Bearer $(jq -r .adminToken "$CLAIR_CONFIG_DIR/agent.json")" "$HOOK/clair/ctl/stop"
+      sleep 15 # past ThrottleInterval, when launchd would have restarted a failure
+      launchctl print "$TARGET" | grep -E 'state =|last exit code ='
+      launchctl print "$TARGET" | grep 'state = not running' > /dev/null
+      if bin/clair status; then echo "the daemon is still answering"; exit 1; fi
+      code=0
+      bin/clair service status || code=$?
+      [ "$code" -eq 3 ] # exitUnreachable: installed and loaded, and nothing answers
+      bin/clair service uninstall
+      test ! -e "$HOME/Library/LaunchAgents/$LABEL.plist"
+      if launchctl print "$TARGET" > /dev/null 2>&1; then echo "still loaded"; exit 1; fi
+    # Published names carry the version, as scripts/agent-release.mjs in clair-web stages them. The
+    # first install has no config directory yet, as on a new Mac: it must say the service runs.
+    - |
+      echo "--- install.sh from claircode.app, against this commit's build"
+      v=v0.0.0-ci
+      rel="$W/releases"
+      mkdir -p "$rel/$v"
+      echo "$v" > "$rel/latest.txt"
+      for arch in arm64 amd64; do
+        CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$v" -o "$rel/$v/clair-$v-darwin-$arch" ./cmd/clair
+      done
+      (cd "$rel/$v" && shasum -a 256 clair-* > SHA256SUMS.txt)
+      nohup "$B/releasesign" serve -listen 127.0.0.1:18000 "$rel" > "$W/logs/releases.log" 2>&1 &
+      listening 18000 || { cat "$W/logs/releases.log"; exit 1; }
+      curl -fsSL https://claircode.app/install.sh -o "$W/install.sh"
+      (
+        export CLAIR_RELEASES_URL=http://127.0.0.1:18000 CLAIR_INSTALL_DIR="$W/install" CLAIR_CONFIG_DIR="$W/clair-new"
+        installs() { out=$("$@" 2>&1); echo "$out"; grep -q 'The clair service is running' <<< "$out"; }
+        echo "--- a first install"
+        installs /bin/sh "$W/install.sh"
+        echo "--- an upgrade over the running service"
+        installs /bin/sh "$W/install.sh" "$v"
+        echo "--- a shell under Rosetta, which must still install the arm64 build"
+        arch -x86_64 /usr/bin/true
+        installs arch -x86_64 /bin/sh "$W/install.sh"
+        file "$CLAIR_INSTALL_DIR/clair" | grep -q arm64
+        "$CLAIR_INSTALL_DIR/clair" service uninstall
+      )
+    # Builds that trust a key made for this run (RELEASE_TEST_KEY), served on 127.0.0.1 the way
+    # claircode.app lays releases out; the key never leaves the checkout.
+    - |
+      echo "--- the LaunchAgent updates itself from a signed release"
+      rel="$W/self-update"
+      src=http://127.0.0.1:18001
+      arch=$(go env GOARCH)
+      key="$W/release-test.pem"
+      pub=$(bin/releasesign keygen -out "$key")
+      bin/releasesign keygen -out "$W/foreign.pem" > /dev/null
+      for v in v0.0.1 v0.0.2 v0.0.3 v0.0.4; do
+        make build VERSION=$v RELEASE_TEST_KEY="$pub"
+        mkdir -p "$rel/$v"
+        cp bin/clair "$rel/$v/clair-$v-darwin-$arch"
+        (cd "$rel/$v" && shasum -a 256 clair-* > SHA256SUMS.txt)
+        signer="$key"
+        [ "$v" = v0.0.4 ] && signer="$W/foreign.pem"
+        bin/releasesign sign -key "$signer" "$rel/$v"
+      done
+      printf x >> "$rel/v0.0.3/clair-v0.0.3-darwin-$arch" # no longer the signed bytes
+      echo v0.0.1 > "$rel/latest.txt"
+      nohup "$B/releasesign" serve -listen 127.0.0.1:18001 "$rel" > "$W/logs/self-update-releases.log" 2>&1 &
+      listening 18001 || { cat "$W/logs/self-update-releases.log"; exit 1; }
+
+      dest="$W/self-update-bin"
+      mkdir -p "$dest"
+      cp "$rel/v0.0.1/clair-v0.0.1-darwin-$arch" "$dest/clair"
+      clair="$dest/clair"
+      "$clair" service install
+      out=$("$clair" update -check -releases "$src")
+      echo "$out"
+      grep -q "clair v0.0.1 is the latest release" <<< "$out"
+
+      echo v0.0.2 > "$rel/latest.txt"
+      before=$(pid)
+      "$clair" update -releases "$src"
+      "$clair" version | grep -q '^clair v0.0.2 '
+      codesign --verify --strict --verbose=2 "$clair"
+      go run ./tools/machocheck "$clair"
+      if xattr "$clair" | grep -q com.apple.quarantine; then echo "the new binary is quarantined"; exit 1; fi
+      [ "$(pid)" = "$before" ] # still the old daemon, on its old image
+      out=$("$clair" status)
+      echo "$out"
+      grep -q "updates: clair v0.0.2 is installed" <<< "$out"
+
+      "$clair" service restart
+      "$clair" status -json | jq -e '.version == "v0.0.2"'
+
+      for v in v0.0.3 v0.0.4; do
+        echo "$v" > "$rel/latest.txt"
+        if "$clair" update -releases "$src"; then echo "$v was installed"; exit 1; fi
+        "$clair" version | grep -q '^clair v0.0.2 '
+      done
+      "$clair" service uninstall
+  after_script:
+    # Nothing of the job's may outlive it: its LaunchAgent, its servers, its log directory.
+    - |
+      plist="$HOME/Library/LaunchAgents/$LABEL.plist"
+      if [ -e "$plist" ]; then
+        case "$(plutil -extract ProgramArguments.0 raw -o - "$plist")" in
+        "$CI_PROJECT_DIR"/*) launchctl bootout "gui/$(id -u)/$LABEL" 2> /dev/null || true; rm -f "$plist" ;;
+        esac
+      fi
+      pkill -f "^$CI_PROJECT_DIR/(bin|\.mac)/" || true
+      if [ ! -e "$plist" ] && [ -d "$HOME/Library/Logs/clair" ]; then
+        mkdir -p "$CI_PROJECT_DIR/.mac/logs"
+        tail -40 "$HOME/Library/Logs/clair/daemon.log" || true
+        mv "$HOME/Library/Logs/clair" "$CI_PROJECT_DIR/.mac/logs/launchd"
+      fi
+  artifacts:
+    when: always
+    paths: [.mac/logs/]
+    expire_in: 2 weeks
