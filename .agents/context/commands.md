@@ -16,6 +16,7 @@ fastest:
 | `test` | `go test -race -shuffle=on -count=1` over every package; coverage in `coverage.out` |
 | `vuln` | `govulncheck`: no known vulnerability reachable from this module (advisory in CI, blocking here) |
 | `adr-check` | `.agents/memory/decisions.md` matches the ADR files |
+| `changelog-check` | `CHANGELOG.md` is a Level 2 [Declarative Changelog](https://whatsnew.fyi/spec) with no warnings (`declarative-changelog` through `npx`, so it needs Node.js 20+) |
 
 Then `make build` and `bin/clair version` if the change touches `cmd/clair` or the
 linker-injected version.
@@ -61,12 +62,17 @@ linker-injected version.
 
 ## Cutting a release
 
-1. `make check` on the commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
-2. The tag pipeline runs `dist`, then `sign` (the Windows builds, through Azure Artifact Signing),
+1. In `CHANGELOG.md` (a [Declarative Changelog](https://whatsnew.fyi/spec)), add
+   `## [X.Y.Z](https://github.com/clair-app/clair-agent/releases/tag/vX.Y.Z) — <now, RFC 3339>`
+   under `## Unreleased`, with a one-line `>` summary and items that say what changed for the
+   user, not the commit subjects. Bump `document.updated`, then `make changelog-check`.
+   Never edit a published entry's version or date: together they are its id.
+2. `make check` on the commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. The tag pipeline runs `dist`, then `sign` (the Windows builds, through Azure Artifact Signing),
    `signature:windows` (Windows' own verdict on them), and `release`, which uploads the builds and
    `SHA256SUMS.txt` to `packages/generic/clair/vX.Y.Z/` (ADR 2026-09.6uv6). Only a protected `v*`
    tag gets the signing credentials, so push tags as a Maintainer.
-3. In clair-web, `CLAIR_RELEASE_KEY=<primary key.pem> node scripts/agent-release.mjs pin vX.Y.Z`
+4. In clair-web, `CLAIR_RELEASE_KEY=<primary key.pem> node scripts/agent-release.mjs pin vX.Y.Z`
    hashes the uploaded files into `agent-release.json` and signs them with the offline release
    key. That signature is what every installed agent checks before it updates itself
    (ADR 2026-09.qk6v). Never pin from a local `dist/`. To check an upload, `make dist

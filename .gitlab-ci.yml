@@ -40,6 +40,17 @@ adr-index:
   before_script: []
   script: make adr-check
 
+# CHANGELOG.md must stay a Level 2 Declarative Changelog with no warnings
+# (https://whatsnew.fyi/spec). The validator is an npm package, so this job takes the Node
+# image, which has make too, instead of the Go one.
+changelog:
+  stage: check
+  image: node:24
+  interruptible: true
+  variables:
+    npm_config_update_notifier: "false"
+  script: make changelog-check
+
 # Tidy go.mod/go.sum and gofumpt/goimports-clean sources; both are autocorrectable
 # (`make tidy`, `make fmt`), so a red job here is a forgotten step, not a finding.
 format:

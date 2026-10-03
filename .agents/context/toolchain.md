@@ -25,10 +25,11 @@ What is pinned, where, and how to change it. The reasoning is ADR 2026-09.kau2.
 | --- | --- | --- |
 | `golangci-lint` v2 | `GOLANGCI_LINT_VERSION` in the Makefile | `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@<pin>` |
 | `govulncheck` | `GOVULNCHECK_VERSION` in the Makefile | `go install golang.org/x/vuln/cmd/govulncheck@<pin>` |
+| `declarative-changelog` | `DECLARATIVE_CHANGELOG_VERSION` in the Makefile | nothing: `make changelog-check` runs `npx --yes declarative-changelog@<pin>`, so it needs Node.js 20+ |
 
-`make tools` installs both; a stamp file `bin/.<tool>@<version>` records what is there,
-so changing a pin reinstalls on the next `make lint` / `make vuln`. Nothing is read from
-`$GOPATH/bin`, and the Makefile always calls `./bin/<tool>` by path. To bump: change the
+`make tools` installs the two Go tools; a stamp file `bin/.<tool>@<version>` records what
+is there, so changing a pin reinstalls on the next `make lint` / `make vuln`. Nothing is
+read from `$GOPATH/bin`, and the Makefile always calls `./bin/<tool>` by path. To bump: change the
 pin, `make tools`, `make check`, read the linter's release notes for anything newly
 enabled or deprecated (the config is explicit, so nothing enables itself), commit.
 
@@ -70,10 +71,11 @@ To add one:
 
 ## CI (`.gitlab-ci.yml`)
 
-Stages `check` → `build`; jobs `adr-index`, `format`, `lint`, `test` (coverage scraped
-from `go tool cover -func`), `vuln` (allow_failure: advisory until the agent handles keys)
-and `build` (host binary, `clair version`, then `make build-all` as artifacts, which ends
-with `tools/machocheck` verifying the darwin builds' code signatures). A `vX.Y.Z` tag
+Stages `check` → `build`; jobs `adr-index`, `changelog` (`make changelog-check` in the
+`node:24` image), `format`, `lint`, `test` (coverage scraped from `go tool cover -func`),
+`vuln` (allow_failure: advisory until the agent handles keys) and `build` (host binary,
+`clair version`, then `make build-all` as artifacts, which ends with `tools/machocheck`
+verifying the darwin builds' code signatures). A `vX.Y.Z` tag
 adds `dist` → `sign` → `signature:windows` → `release`: `make dist`, the Windows builds signed with
 jsign through Azure Artifact Signing (a pinned jar in `eclipse-temurin:21-jre`), checked by Windows,
 then `make dist-signed` and an upload to the generic package registry (ADRs 2026-09.zvs8, 2026-09.6uv6). Module and

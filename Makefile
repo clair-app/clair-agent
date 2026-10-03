@@ -11,6 +11,10 @@ BIN    := $(CURDIR)/bin
 GOLANGCI_LINT_VERSION := v2.13.2
 GOVULNCHECK_VERSION   := v1.8.0
 
+# The CHANGELOG.md validator is an npm package (Node.js 20+), run through npx at
+# this pin rather than installed into ./bin.
+DECLARATIVE_CHANGELOG_VERSION := 0.2.0
+
 # Injected into cmd/clair; `clair version` reports them. A plain `go build` still
 # works — main.go falls back to the module's build info. DATE is the commit's time,
 # not the build's, so every input is fixed by the commit and two builds of it hash
@@ -38,7 +42,7 @@ GOFLAGS_BUILD := -trimpath -ldflags '$(LDFLAGS)'
 
 .PHONY: help
 help: ## List targets
-	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # ----------------------------------------------------------------------- build
 
@@ -111,7 +115,7 @@ run: ## Run the agent from source: make run ARGS="version"
 # ----------------------------------------------------------------------- checks
 
 .PHONY: check
-check: tidy-check fmt-check lint test vuln adr-check ## Everything CI runs (the finishing gate)
+check: tidy-check fmt-check lint test vuln adr-check changelog-check ## Everything CI runs (the finishing gate)
 
 .PHONY: test
 test: ## Unit tests with the race detector, shuffled, coverage to coverage.out
@@ -152,6 +156,12 @@ tidy: ## go mod tidy
 .PHONY: tidy-check
 tidy-check: ## Fail if go.mod / go.sum are not tidy
 	go mod tidy -diff
+
+# CHANGELOG.md is a Declarative Changelog (https://whatsnew.fyi/spec): Level 2,
+# every change under Added/Changed/…, and not one warning.
+.PHONY: changelog-check
+changelog-check: ## Fail unless CHANGELOG.md is a valid declarative changelog
+	npx --yes declarative-changelog@$(DECLARATIVE_CHANGELOG_VERSION) validate CHANGELOG.md --require-level 2 --max-warnings 0
 
 # ------------------------------------------------------------------------- ADRs
 
