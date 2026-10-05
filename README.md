@@ -10,10 +10,11 @@ implementation of its "agent" half; the relay (`clair-server`) is separate.
 
 **Status:** the tunnel and pairing are implemented and proven end to end against an in-process
 fake relay and a fake phone (`internal/daemon/e2e_test.go`), and as real processes with
-`tools/relaysim` and `tools/phonesim`. A background subagent's permission prompt — which Claude
-Code shows in the terminal only once the hook lets go — is handed to the terminal at once while
-someone is typing at one, and held for the watch otherwise (RELAY.md §4.3; the daemon reads
-terminal input idle the way `w` does, no helper, no extra hook). `clair service install` runs the
+`tools/relaysim` and `tools/phonesim`. A background subagent's permission prompt in an interactive
+session — which Claude Code shows in the terminal only once the hook lets go — is handed to the
+terminal at once while someone is typing at one, and held for the watch otherwise (RELAY.md §4.3;
+the daemon reads terminal input idle the way `w` does, no helper, no extra hook). A `claude -p`
+run's prompt is always held for the watch, since no terminal would show it. `clair service install` runs the
 daemon as your login service (verified on Linux and macOS; the Windows half is written and
 tested, not yet run at a signed-in desktop). A `vX.Y.Z` tag publishes the builds to the package registry,
 and claircode.app's `install.sh` / `install.ps1` serve them (ADR 2026-09.zvs8). After that the

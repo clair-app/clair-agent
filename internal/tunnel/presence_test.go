@@ -163,6 +163,106 @@ func TestBubbledDecideHeldWhileAwayIsReleasedWhenTheyReturn(t *testing.T) {
 	})
 }
 
+// A subagent's decide is bubbled whatever the session's mode, in an
+// interactive session or one whose hooks block predates the entrypoint header
+// (ADR 2026-10.gw8w): released at once while someone is there, held while
+// nobody is and released when they return.
+func TestSubagentDecideIsReleasedWhateverItsMode(t *testing.T) {
+	for _, hook := range []record.Hook{
+		{Event: "PermissionRequest", Mode: "auto", Subagent: true},
+		{Event: "PermissionRequest", Mode: "auto", Subagent: true, Entrypoint: record.EntrypointCLI},
+		{Event: "PermissionRequest", Mode: "acceptEdits", Subagent: true, Entrypoint: record.EntrypointCLI},
+	} {
+		t.Run(hook.Mode+"/"+hook.Entrypoint, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h, sampler := presenceHarness(t, 5*time.Second, presence.DefaultThreshold)
+				defer h.stop(t)
+				got := startHold(t.Context(), h, decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), hook)
+				synctest.Wait()
+				select {
+				case r := <-got:
+					if r.err != nil || r.ok {
+						t.Fatalf("Hold = %+v, want no decision at once", r)
+					}
+				default:
+					t.Fatal("Hold blocked on a subagent's decide with someone at the terminal")
+				}
+				recs, envs := records(t, h)
+				if len(recs) != 2 || envs[0].Wake != envelope.WakeSoon || recs[1].Control != record.ControlCancel || recs[1].Reason != record.CancelTerminal {
+					t.Fatalf("uploaded %+v, want the decide as soon and a cancel (terminal)", recs)
+				}
+
+				// Nobody there: held, then released when someone returns.
+				sampler.set(10 * time.Minute)
+				got = startHold(t.Context(), h, decide("01ARYZ6S41TSV4RRFFQ69G5FAW"), hook)
+				synctest.Wait()
+				select {
+				case r := <-got:
+					t.Fatalf("Hold returned %+v with nobody at the terminal, want it held", r)
+				default:
+				}
+				sampler.set(2 * time.Second)
+				time.Sleep(presencePoll)
+				synctest.Wait()
+				select {
+				case r := <-got:
+					if r.err != nil || r.ok {
+						t.Fatalf("Hold = %+v, want no decision", r)
+					}
+				default:
+					t.Fatal("Hold still blocked after someone returned")
+				}
+				if recs, _ := records(t, h); recs[len(recs)-1].Control != record.ControlCancel || recs[len(recs)-1].Reason != record.CancelTerminal {
+					t.Errorf("last record = %+v, want a cancel (terminal)", recs[len(recs)-1])
+				}
+			})
+		})
+	}
+}
+
+// Outside an interactive session nothing draws a dialog once the hook
+// returns — `claude -p` denies the tool — so a subagent's decide, even a
+// bubble one, is held like the main agent's while someone is there, and
+// the watcher never releases it (ADR 2026-10.gw8w).
+func TestNonInteractiveSubagentDecideIsHeldWhileSomeoneIsThere(t *testing.T) {
+	for _, hook := range []record.Hook{
+		{Event: "PermissionRequest", Mode: "default", Subagent: true, Entrypoint: "sdk-cli"},
+		{Event: "PermissionRequest", Mode: record.ModeBubble, Subagent: true, Entrypoint: "sdk-cli"},
+		{Event: "PermissionRequest", Mode: "auto", Subagent: true, Entrypoint: "claude-vscode"},
+	} {
+		t.Run(hook.Mode+"/"+hook.Entrypoint, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h, sampler := presenceHarness(t, 5*time.Second, presence.DefaultThreshold)
+				defer h.stop(t)
+				got := startHold(t.Context(), h, decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), hook)
+				synctest.Wait()
+				// Away and back: reported, never released.
+				sampler.set(time.Hour)
+				time.Sleep(presencePoll)
+				synctest.Wait()
+				sampler.set(time.Second)
+				time.Sleep(presencePoll)
+				synctest.Wait()
+				select {
+				case r := <-got:
+					t.Fatalf("Hold returned %+v, want it held for the phone", r)
+				default:
+				}
+				recs, envs := records(t, h)
+				if len(recs) != 3 || envs[0].Wake != envelope.WakeNow || recs[1].Path != record.PathPresence || recs[2].Path != record.PathPresence {
+					t.Fatalf("uploaded %+v, want the decide as now and two presence records, no cancel", recs)
+				}
+				env := h.phone.seal(record.Record{Kind: record.KindResponse, ReqID: "01ARYZ6S41TSV4RRFFQ69G5FAV", Status: 204})
+				h.relay.events <- relay.Event{Kind: relay.EventEnvelope, Cursor: "1", Envelope: &env}
+				synctest.Wait()
+				if r := <-got; r.err != nil || !r.ok || r.resp.Status != 204 {
+					t.Fatalf("Hold = %+v, want the phone's 204", r)
+				}
+			})
+		})
+	}
+}
+
 func TestPresenceChangeIsReportedOnlyWhileADecideIsHeld(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h, sampler := presenceHarness(t, 5*time.Second, presence.DefaultThreshold)

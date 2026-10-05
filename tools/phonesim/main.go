@@ -18,7 +18,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,7 +26,6 @@ import (
 	"claircode.app/clair-agent/internal/envelope"
 	"claircode.app/clair-agent/internal/identity"
 	"claircode.app/clair-agent/internal/pairing"
-	"claircode.app/clair-agent/internal/presence"
 	"claircode.app/clair-agent/internal/record"
 	"claircode.app/clair-agent/internal/relay"
 )
@@ -193,9 +191,9 @@ func simulate(ctx context.Context, o options, stdout io.Writer) error {
 		}
 		describe(stdout, rec, env, o.verbose)
 		if rec.Kind == record.KindRequest && rec.Path == record.PathDecide && o.answer != "none" {
-			// The phone's half of RELAY.md §4.3: a bubbled prompt with someone
-			// at the terminal is the host's to show; a cancel follows.
-			if leftToTerminal(rec, o.threshold()) {
+			// The phone's half of RELAY.md §4.3: a decide the agent handed to
+			// the terminal is not the phone's to answer; a cancel follows.
+			if leftToTerminal(env) {
 				fmt.Fprintln(stdout, "  → left to the terminal (bubbled, someone is there)")
 				return nil
 			}
@@ -234,28 +232,13 @@ func simulate(ctx context.Context, o options, stdout io.Writer) error {
 	return err
 }
 
-// threshold is the presence threshold this phone asked for, or the agent's default.
-func (o options) threshold() time.Duration {
-	if o.idleThreshold >= 0 {
-		return time.Duration(o.idleThreshold) * time.Second
-	}
-	return presence.DefaultThreshold
-}
-
-// leftToTerminal applies the release predicate the agent applies (§4.3), on
-// the same inputs: the hook's permission mode and the stamped idle time.
-func leftToTerminal(rec *record.Record, threshold time.Duration) bool {
-	var body struct {
-		PermissionMode string `json:"permission_mode"`
-	}
-	if json.Unmarshal(rec.Body, &body) != nil || body.PermissionMode != record.ModeBubble {
-		return false
-	}
-	ms, err := strconv.ParseInt(rec.Headers[record.IdleHeader], 10, 64)
-	if err != nil {
-		return false
-	}
-	return presence.Sample{Idle: time.Duration(ms) * time.Millisecond, Known: true}.Present(threshold)
+// leftToTerminal reports whether the agent released a decide to the terminal
+// rather than holding it: it sends a released one as `soon`, a held one as
+// `now` (§4.3). The agent's rule also reads its own entrypoint header, which
+// never leaves the host (ADR 2026-10.gw8w), so the phone takes the agent's
+// word from the wake instead of re-deriving it.
+func leftToTerminal(env envelope.Envelope) bool {
+	return env.Wake == envelope.WakeSoon
 }
 
 // open validates, decrypts and replay-checks one host envelope.

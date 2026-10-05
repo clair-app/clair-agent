@@ -57,8 +57,12 @@ func TestRenderHooksVariants(t *testing.T) {
 		t.Error("SessionStart rendered although not included")
 	}
 	data, _ := ojson.Marshal(noStart, "")
-	if !strings.Contains(string(data), `/clair/v1/hook/decide?timeout=600","headers":{"Authorization":"Bearer t"},"timeout":600`) {
+	if !strings.Contains(string(data), `/clair/v1/hook/decide?timeout=600","headers":{"Authorization":"Bearer t","X-Clair-Entrypoint":"$CLAUDE_CODE_ENTRYPOINT"},"allowedEnvVars":["CLAUDE_CODE_ENTRYPOINT"],"timeout":600`) {
 		t.Errorf("custom permission timeout not applied: %s", data)
+	}
+	// Only the decide hook is told the session's entrypoint (ADR 2026-10.gw8w).
+	if n := strings.Count(string(data), "allowedEnvVars"); n != 1 {
+		t.Errorf("allowedEnvVars rendered %d times, want once, on the decide hook: %s", n, data)
 	}
 	if strings.Contains(string(data), "X-Clair-Host") || strings.Contains(string(data), "7317//") {
 		t.Errorf("host header rendered without a host, or double slash: %s", data)
@@ -91,13 +95,15 @@ func TestSubstituteAndValidate(t *testing.T) {
 	if err != nil || dropped != nil {
 		t.Fatalf("ValidateSnippet: %v, dropped %q", err, dropped)
 	}
-	if got := compact(t, hooks); got != want {
-		t.Errorf("ValidateSnippet =\n%s\nwant the snippet unchanged\n%s", got, want)
+	rebuilt := `{"hooks":{"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=600","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop","X-Clair-Entrypoint":"$CLAUDE_CODE_ENTRYPOINT"},"allowedEnvVars":["CLAUDE_CODE_ENTRYPOINT"],"timeout":600}]}],"SessionStart":[{"hooks":[{"type":"command","command":"/opt/clair/clair hook-event /clair/v1/hook/event"}]}]}}`
+	if got := compact(t, hooks); got != rebuilt {
+		t.Errorf("ValidateSnippet =\n%s\nwant the snippet with the agent's entrypoint header\n%s", got, rebuilt)
 	}
 }
 
 // The phone's relayTemplate() with its defaults is the agent's own default
-// block with placeholders: rebuilding it must change nothing.
+// block with placeholders, less the decide hook's entrypoint header the agent
+// adds itself: rebuilding it must give exactly that block.
 func TestValidateSnippetKeepsThePhoneTemplate(t *testing.T) {
 	t.Parallel()
 
@@ -290,7 +296,12 @@ func TestValidateSnippetRebuildsEachHook(t *testing.T) {
 		{
 			name:    "unknown hook and group members dropped, matcher and status kept",
 			snippet: `{"hooks":{"PermissionRequest":[{"matcher":"Bash","extra":1,"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=0600","timeout":600,"statusMessage":"on the watch","async":true,"once":true}]}]}}`,
-			want:    `{"hooks":{"PermissionRequest":[{"matcher":"Bash","hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=600","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop"},"timeout":600,"statusMessage":"on the watch"}]}]}}`,
+			want:    `{"hooks":{"PermissionRequest":[{"matcher":"Bash","hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=600","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop","X-Clair-Entrypoint":"$CLAUDE_CODE_ENTRYPOINT"},"allowedEnvVars":["CLAUDE_CODE_ENTRYPOINT"],"timeout":600,"statusMessage":"on the watch"}]}]}}`,
+		},
+		{
+			name:    "the decide hook's environment is the agent's, whatever the phone lists",
+			snippet: `{"hooks":{"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide","headers":{"Authorization":"Bearer t0k3n","X-Clair-Entrypoint":"$AWS_SECRET_ACCESS_KEY"},"allowedEnvVars":["AWS_SECRET_ACCESS_KEY","CLAUDE_CODE_ENTRYPOINT"]}]}]}}`,
+			want:    `{"hooks":{"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop","X-Clair-Entrypoint":"$CLAUDE_CODE_ENTRYPOINT"},"allowedEnvVars":["CLAUDE_CODE_ENTRYPOINT"]}]}]}}`,
 		},
 		{
 			name:    "the own command hook loses anything beside its command",

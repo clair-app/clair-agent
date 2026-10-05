@@ -313,6 +313,90 @@ func TestRequestRecordShape(t *testing.T) {
 	}
 }
 
+// The release rule's inputs (ADR 2026-10.gw8w): whether the body carries an
+// agent_id, whatever its type, and on a decide the agent's own entrypoint
+// header, which is read and never forwarded.
+func TestHookFieldsForTheReleaseRule(t *testing.T) {
+	t.Parallel()
+
+	const subagent = `{"session_id":"s","hook_event_name":"PermissionRequest","permission_mode":"auto","agent_id":"acdcc84898a5d17b0","agent_type":"mesh-lab-reviewer","tool_name":"Bash","tool_input":{"command":"bash .claude/hooks/review-gate.sh --stamp mesh-lab-reviewer"}}`
+	tests := []struct {
+		name, path, body, entrypoint string
+		want                         record.Hook
+	}{
+		{
+			name: "auto-mode subagent in an interactive session", path: record.PathDecide, body: subagent, entrypoint: "cli",
+			want: record.Hook{Event: "PermissionRequest", Mode: "auto", Subagent: true, Entrypoint: "cli"},
+		},
+		{
+			name: "subagent from a hooks block without the header", path: record.PathDecide, body: subagent,
+			want: record.Hook{Event: "PermissionRequest", Mode: "auto", Subagent: true},
+		},
+		{
+			name: "main agent in claude -p", path: record.PathDecide, entrypoint: " sdk-cli ",
+			body: `{"session_id":"s","hook_event_name":"PermissionRequest","permission_mode":"default"}`,
+			want: record.Hook{Event: "PermissionRequest", Mode: "default", Entrypoint: "sdk-cli"},
+		},
+		{
+			name: "null agent_id", path: record.PathDecide, entrypoint: "cli",
+			body: `{"session_id":"s","hook_event_name":"PermissionRequest","agent_id":null}`,
+			want: record.Hook{Event: "PermissionRequest", Entrypoint: "cli"},
+		},
+		{
+			name: "empty agent_id", path: record.PathDecide,
+			body: `{"session_id":"s","hook_event_name":"PermissionRequest","agent_id":""}`,
+			want: record.Hook{Event: "PermissionRequest"},
+		},
+		{
+			name: "numeric agent_id", path: record.PathDecide,
+			body: `{"session_id":"s","hook_event_name":"PermissionRequest","agent_id":7}`,
+			want: record.Hook{Event: "PermissionRequest", Subagent: true},
+		},
+		{
+			name: "object agent_id", path: record.PathDecide,
+			body: `{"session_id":"s","hook_event_name":"PermissionRequest","agent_id":{"id":"a"}}`,
+			want: record.Hook{Event: "PermissionRequest", Subagent: true},
+		},
+		{
+			name: "agent_id nested in the tool input only", path: record.PathDecide,
+			body: `{"session_id":"s","hook_event_name":"PermissionRequest","tool_input":{"agent_id":"a"}}`,
+			want: record.Hook{Event: "PermissionRequest"},
+		},
+		{
+			name: "an event keeps no entrypoint", path: record.PathEvent, entrypoint: "cli",
+			body: `{"session_id":"s","hook_event_name":"PreToolUse","agent_id":"a"}`,
+			want: record.Hook{Event: "PreToolUse", Subagent: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sink := &fakeSink{}
+			s := newServer(t, sink, nil)
+			headers := map[string]string{record.HostHeader: "walter-laptop"}
+			if tt.entrypoint != "" {
+				headers[record.EntrypointHeader] = tt.entrypoint
+			}
+			if rec := do(t, s, "POST", tt.path, "Bearer "+token, strings.NewReader(tt.body), headers); rec.Code != 204 {
+				t.Fatalf("POST %s = %d, want 204", tt.path, rec.Code)
+			}
+			var got record.Hook
+			var forwarded map[string]string
+			if tt.path == record.PathDecide {
+				got, forwarded = sink.holds[0].hook, sink.holds[0].rec.Headers
+			} else {
+				got, forwarded = sink.enqueued[0].hook, sink.enqueued[0].rec.Headers
+			}
+			if got != tt.want {
+				t.Errorf("hook = %+v, want %+v", got, tt.want)
+			}
+			if len(forwarded) != 1 || forwarded[record.HostHeader] != "walter-laptop" {
+				t.Errorf("forwarded headers = %v, want only %s", forwarded, record.HostHeader)
+			}
+		})
+	}
+}
+
 func TestDecideTimeoutClamp(t *testing.T) {
 	t.Parallel()
 

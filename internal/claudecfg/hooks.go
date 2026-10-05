@@ -41,6 +41,10 @@ const (
 	// (`http://127.0.0.1:__PORT__`, RELAY.md §4); an agent listening on
 	// another spelling of loopback still accepts it for its own port.
 	canonicalHost = "127.0.0.1"
+	// The variable Claude Code sets in its own environment at start: `cli`
+	// in an interactive terminal, `sdk-cli` under `claude -p`. The decide
+	// hook hands it to the release rule (ADR 2026-10.gw8w).
+	entrypointEnv = "CLAUDE_CODE_ENTRYPOINT"
 )
 
 // ErrSnippetRejected is a phone snippet that would install anything but the
@@ -116,19 +120,28 @@ func RenderHooks(c SnippetConfig) *ojson.Object {
 }
 
 // httpHook is the one shape of the agent's http hooks, whoever asked for
-// it: the bearer and the host header are always the agent's own, and there
-// is never an allowedEnvVars (ADR 2026-09.ut2g). A timeout of 0 is omitted,
-// as is an empty status.
+// it: the bearer and the host header are always the agent's own (ADR
+// 2026-09.ut2g). The decide hook also carries the session's entrypoint, the
+// one variable Claude Code is ever allowed to fill in, and a header the agent
+// reads and never forwards (ADR 2026-10.gw8w); no other hook has an
+// allowedEnvVars. A timeout of 0 is omitted, as is an empty status.
 func (c SnippetConfig) httpHook(path string, timeout int, status string) *ojson.Object {
 	h := ojson.NewObject()
 	h.Set("type", "http")
 	h.Set("url", strings.TrimSuffix(c.BaseURL, "/")+path)
+	decide := strings.HasPrefix(path, record.PathDecide)
 	headers := ojson.NewObject()
 	headers.Set("Authorization", "Bearer "+c.Token)
 	if c.Host != "" {
 		headers.Set(record.HostHeader, c.Host)
 	}
+	if decide {
+		headers.Set(record.EntrypointHeader, "$"+entrypointEnv)
+	}
 	h.Set("headers", headers)
+	if decide {
+		h.Set("allowedEnvVars", []ojson.Value{entrypointEnv})
+	}
 	if timeout > 0 {
 		h.Set("timeout", json.Number(strconv.Itoa(timeout)))
 	}
@@ -215,11 +228,12 @@ func knownEvent(event string) bool {
 //
 // Of a phone's hook only the endpoint, a timeout and a statusMessage are
 // kept, and of a group only its matcher; the headers are the agent's own
-// (c.Token, c.Host) and nothing else a phone sent — allowedEnvVars above all,
-// which would have Claude Code copy its environment into a header the agent
-// forwards — reaches settings.json. A compromised phone shapes the agent's
-// own hooks and nothing else, and cannot route an event it is only told
-// about to the endpoint whose answer Claude Code obeys.
+// (c.Token, c.Host, and on the decide hook the entrypoint) and nothing else a
+// phone sent — allowedEnvVars above all, which would have Claude Code copy
+// its environment into a header the agent forwards — reaches settings.json.
+// A compromised phone shapes the agent's own hooks and nothing else, and
+// cannot route an event it is only told about to the endpoint whose answer
+// Claude Code obeys.
 func ValidateSnippet(snippet []byte, c SnippetConfig) (hooks *ojson.Object, dropped []string, err error) {
 	if len(snippet) > maxSnippetBytes {
 		return nil, nil, fmt.Errorf("%w: %d bytes, over %d", ErrSnippetRejected, len(snippet), maxSnippetBytes)

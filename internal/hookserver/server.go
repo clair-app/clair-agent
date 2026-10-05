@@ -260,14 +260,17 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool)
 }
 
 // topLevel holds the two fields the phone's HookInput.parse requires and the
-// one the release rule reads (record.Hook, ADR 2026-09.34qh). The session id
-// is checked for presence and never read: a hook without one is refused here
-// rather than tunnelled to a phone that would drop it anyway, leaving a
-// decide hanging for its whole timeout.
+// two the release rule reads (record.Hook, ADRs 2026-09.34qh and
+// 2026-10.gw8w). The session id is checked for presence and never read: a
+// hook without one is refused here rather than tunnelled to a phone that
+// would drop it anyway, leaving a decide hanging for its whole timeout. The
+// agent id is checked for presence too, as raw JSON, so its type can never
+// fail a body.
 type topLevel struct {
-	SessionID      string `json:"session_id"`
-	HookEventName  string `json:"hook_event_name"`
-	PermissionMode string `json:"permission_mode"`
+	SessionID      string          `json:"session_id"`
+	HookEventName  string          `json:"hook_event_name"`
+	PermissionMode string          `json:"permission_mode"`
+	AgentID        json.RawMessage `json:"agent_id"`
 }
 
 // hookFields validates a hook body and returns what the agent may know of
@@ -278,7 +281,14 @@ func hookFields(w http.ResponseWriter, body []byte) (record.Hook, bool) {
 		w.WriteHeader(http.StatusBadRequest)
 		return record.Hook{}, false
 	}
-	return record.Hook{Event: f.HookEventName, Mode: f.PermissionMode}, true
+	return record.Hook{Event: f.HookEventName, Mode: f.PermissionMode, Subagent: present(f.AgentID)}, true
+}
+
+// present reports whether a top-level value is there at all: neither absent,
+// null nor an empty string.
+func present(v json.RawMessage) bool {
+	s := string(v)
+	return s != "" && s != "null" && s != `""`
 }
 
 // request builds the request record: the path, the query, the one forwarded
@@ -298,7 +308,8 @@ func (s *Server) request(r *http.Request, body []byte) (record.Record, error) {
 	// Only a name in the sanitised-hostname set is forwarded: the header is
 	// the one thing of the request's metadata the phone sees, and a hook
 	// whose headers were shaped elsewhere must not carry anything else
-	// through it (ADR 2026-09.ut2g).
+	// through it (ADR 2026-09.ut2g). The entrypoint header, filled in from
+	// Claude Code's environment, is never forwarded (ADR 2026-10.gw8w).
 	if host := strings.TrimSpace(r.Header.Get(record.HostHeader)); hostname.Valid(host) {
 		rec.Headers = map[string]string{record.HostHeader: host}
 	}
@@ -347,6 +358,9 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The agent's own decide hook says which kind of session asked; the
+	// header is read here and goes no further (ADR 2026-10.gw8w).
+	hook.Entrypoint = strings.TrimSpace(r.Header.Get(record.EntrypointHeader))
 	rec, err := s.request(r, body)
 	if err != nil {
 		s.log.Error("request id not minted", "path", r.URL.Path, "error", err.Error())

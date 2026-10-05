@@ -8,8 +8,9 @@ topics: [presence, hooks, tunnel]
 
 # ADR 2026-09.34qh — The agent reads terminal input idle time itself and releases a bubbled decide to the terminal while someone is at it
 
-Status: Accepted (2026-09-21) · RELAY.md r3 §4.3 is the design; NOTES.md in the `clair` repository
-(2026-09-21) holds the observation.
+Status: Accepted (2026-09-21); its `bubble` marker is widened by ADR 2026-10.gw8w (a subagent's
+`agent_id`, in an interactive session) · RELAY.md r3 §4.3 is the design; NOTES.md in the `clair`
+repository (2026-09-21) holds the observation.
 
 **What was observed.** On Claude Code 2.1.278 a background subagent's `PermissionRequest` runs the
 hooks *first* and reaches the main session's dialog only if none returned a decision: while the

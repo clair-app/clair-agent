@@ -294,11 +294,12 @@ func (t *Tunnel) Enqueue(req record.Record, hook record.Hook) error {
 // Hold satisfies hookserver.Sink for decides: the record is queued as `now`
 // and the call waits for a response record, the client, or the timeout less
 // holdMargin — then the phone is told the decide expired.
-// A bubbled decide is the exception (RELAY.md §4.3): Claude Code draws it in
-// the terminal only once this returns without a decision, so while someone
-// is at a terminal it is not held at all — the phone gets the request and a
-// `cancel` — and one held while nobody was is released the moment someone
-// comes back.
+// A bubbled decide is the exception (RELAY.md §4.3, [record.Hook.Bubbled]):
+// a background agent's prompt in an interactive session, which Claude Code
+// draws in the terminal only once this returns without a decision. While
+// someone is at a terminal it is not held at all — the phone gets the request
+// and a `cancel` — and one held while nobody was is released the moment
+// someone comes back.
 func (t *Tunnel) Hold(ctx context.Context, req record.Record, hook record.Hook, timeout time.Duration) (record.Record, bool, error) {
 	pairs := t.activePairs()
 	if len(pairs) == 0 {
@@ -306,7 +307,7 @@ func (t *Tunnel) Hold(ctx context.Context, req record.Record, hook record.Hook, 
 	}
 	sample := t.sample()
 	req = stamp(req, sample)
-	bubbled := hook.Mode == record.ModeBubble
+	bubbled := hook.Bubbled()
 	threshold := thresholdOf(pairs)
 	if bubbled && sample.Present(threshold) {
 		for _, p := range pairs {

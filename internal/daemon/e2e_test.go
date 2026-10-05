@@ -270,6 +270,12 @@ func (w *world) hostCalls(method, path string) []int {
 // hook posts a hook as Claude Code would and returns the status, body and content type.
 func (w *world) hook(ctx context.Context, t *testing.T, path, body string) (int, []byte, string) {
 	t.Helper()
+	return w.hookWith(ctx, t, path, body, nil)
+}
+
+// hookWith is hook with further request headers, as a hook's `headers` adds them.
+func (w *world) hookWith(ctx context.Context, t *testing.T, path, body string, headers map[string]string) (int, []byte, string) {
+	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+w.addr+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -277,6 +283,9 @@ func (w *world) hook(ctx context.Context, t *testing.T, path, body string) (int,
 	req.Header.Set("Authorization", "Bearer "+w.agent.Token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(record.HostHeader, "walter-laptop")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, nil, ""
@@ -291,6 +300,10 @@ const (
 	permission = `{"session_id":"sess-1","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls > out"}}`
 	bubbled    = `{"session_id":"sess-1","hook_event_name":"PermissionRequest","permission_mode":"bubble","tool_name":"Bash","tool_input":{"command":"ls > out"}}`
 	allow      = `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
+
+	// A background agent's prompt in an auto-mode session, as Claude Code
+	// 2.1.289 sends it: the parent's mode, and an agent_id.
+	subagent = `{"session_id":"sess-1","hook_event_name":"PermissionRequest","permission_mode":"auto","agent_id":"acdcc84898a5d17b0","agent_type":"mesh-lab-reviewer","tool_name":"Bash","tool_input":{"command":"ls > out"}}`
 )
 
 func TestEndToEnd(t *testing.T) {
@@ -555,6 +568,48 @@ func TestBubbledDecideGoesToTheTerminalWhileSomeoneIsThere(t *testing.T) {
 	})
 	if code, _, _ := w.hook(ctx, t, record.PathDecide+"?timeout=600", bubbled); code != http.StatusNoContent {
 		t.Fatalf("bubbled decide under the new threshold = %d, want 204 (15 min idle is now present)", code)
+	}
+}
+
+// TestSubagentDecideInAutoModeGoesToTheTerminal is issue #2 end to end (ADR
+// 2026-10.gw8w): a background agent's prompt in an auto-mode session carries
+// the parent's mode, not `bubble`, and its agent_id is what hands it to the
+// terminal while someone is there. The same prompt from `claude -p`, where
+// nothing would draw it once the hook returns, is held for the phone.
+func TestSubagentDecideInAutoModeGoesToTheTerminal(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	ctx := t.Context()
+	w.phone.next(t) // hello-ack
+	w.phone.next(t) // reset
+	w.phone.mu.Lock()
+	w.phone.answer = func(req *record.Record) *record.Record {
+		return &record.Record{Kind: record.KindResponse, ReqID: req.ReqID, Status: 200, Body: json.RawMessage(allow)}
+	}
+	w.phone.mu.Unlock()
+
+	// An interactive session, someone typed 5 s ago: released at once, and
+	// the entrypoint header stays on the host.
+	code, body, _ := w.hookWith(ctx, t, record.PathDecide+"?timeout=600", subagent, map[string]string{record.EntrypointHeader: record.EntrypointCLI})
+	if code != http.StatusNoContent || len(body) != 0 {
+		t.Fatalf("subagent decide = %d %q, want 204 at once", code, body)
+	}
+	req := w.phone.next(t)
+	if req.Path != record.PathDecide || w.phone.wakeOf(req.N) != envelope.WakeSoon || req.Headers[record.EntrypointHeader] != "" {
+		t.Fatalf("released decide = %+v (wake %s), want it sent as soon without the entrypoint", req, w.phone.wakeOf(req.N))
+	}
+	if rec := w.phone.next(t); rec.Control != record.ControlCancel || rec.ReqID != req.ReqID || rec.Reason != record.CancelTerminal {
+		t.Fatalf("after the release: %+v, want cancel (terminal) for %s", rec, req.ReqID)
+	}
+
+	// claude -p, someone still there: held and answered from the phone.
+	code, body, _ = w.hookWith(ctx, t, record.PathDecide+"?timeout=600", subagent, map[string]string{record.EntrypointHeader: "sdk-cli"})
+	if code != http.StatusOK || string(body) != allow {
+		t.Fatalf("subagent decide from claude -p = %d %q, want the phone's 200", code, body)
+	}
+	if req := w.phone.next(t); req.Path != record.PathDecide || w.phone.wakeOf(req.N) != envelope.WakeNow {
+		t.Fatalf("held decide = %+v (wake %s), want it sent as now", req, w.phone.wakeOf(req.N))
 	}
 }
 

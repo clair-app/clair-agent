@@ -8,8 +8,12 @@
             "url": "http://127.0.0.1:7317/clair/v1/hook/decide?timeout=86400",
             "headers": {
               "Authorization": "Bearer t0k3n",
-              "X-Clair-Host": "walter-laptop"
+              "X-Clair-Host": "walter-laptop",
+              "X-Clair-Entrypoint": "$CLAUDE_CODE_ENTRYPOINT"
             },
+            "allowedEnvVars": [
+              "CLAUDE_CODE_ENTRYPOINT"
+            ],
             "timeout": 86400,
             "statusMessage": "Clair: also on your watch…"
           }

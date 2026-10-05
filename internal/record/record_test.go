@@ -47,6 +47,38 @@ func TestHookEventName(t *testing.T) {
 	}
 }
 
+// The release rule's marker (ADR 2026-10.gw8w): a subagent's decide, or a
+// bubble one, in an interactive session or one whose hooks block predates
+// the entrypoint header; never one from `claude -p` or another launcher.
+func TestHookBubbled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		hook Hook
+		want bool
+	}{
+		{name: "bubble without a header", hook: Hook{Mode: ModeBubble}, want: true},
+		{name: "subagent in auto mode without a header", hook: Hook{Mode: "auto", Subagent: true}, want: true},
+		{name: "subagent in an interactive session", hook: Hook{Mode: "auto", Subagent: true, Entrypoint: EntrypointCLI}, want: true},
+		{name: "bubble in an interactive session", hook: Hook{Mode: ModeBubble, Entrypoint: EntrypointCLI}, want: true},
+		{name: "main agent in auto mode", hook: Hook{Mode: "auto"}, want: false},
+		{name: "main agent in an interactive session", hook: Hook{Mode: "default", Entrypoint: EntrypointCLI}, want: false},
+		{name: "subagent in claude -p", hook: Hook{Mode: "default", Subagent: true, Entrypoint: "sdk-cli"}, want: false},
+		{name: "bubble in claude -p", hook: Hook{Mode: ModeBubble, Subagent: true, Entrypoint: "sdk-cli"}, want: false},
+		{name: "subagent under the Agent SDK", hook: Hook{Subagent: true, Entrypoint: "sdk-ts"}, want: false},
+		{name: "subagent under another launcher", hook: Hook{Subagent: true, Entrypoint: "claude-vscode"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.hook.Bubbled(); got != tt.want {
+				t.Errorf("%+v.Bubbled() = %v, want %v", tt.hook, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMarshalKeepsBodyBytes(t *testing.T) {
 	t.Parallel()
 

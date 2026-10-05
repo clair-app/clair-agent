@@ -1,8 +1,9 @@
 // Package record is the plaintext inside an envelope (RELAY.md §4.1): the
 // tunnelled request, the phone's response, and the control records the two
-// ends exchange. The hook body travels as raw JSON, never re-encoded, and the
-// only fields of it anyone here reads are the two in [Hook] — see the
-// blind-tunnel rule in .agents/rules/go.md and ADR 2026-09.34qh.
+// ends exchange. The hook body travels as raw JSON, never re-encoded, and all
+// anyone here reads of it is what [Hook] holds: two fields and whether a third
+// is there — see the blind-tunnel rule in .agents/rules/go.md and ADRs
+// 2026-09.34qh and 2026-10.gw8w.
 package record
 
 import (
@@ -38,22 +39,53 @@ const (
 	// when the host has a presence signal: milliseconds since a terminal of
 	// this user's last read input (§4.3).
 	IdleHeader = "X-Clair-Idle-Ms"
+	// EntrypointHeader carries the session's CLAUDE_CODE_ENTRYPOINT on the
+	// agent's own decide hook, which Claude Code fills in from its
+	// environment. It stays on the loopback: the release rule reads it, and
+	// it is never forwarded (ADR 2026-10.gw8w).
+	EntrypointHeader = "X-Clair-Entrypoint"
 )
 
-// Hook is what the loopback server learned from a hook body's top level, and
-// all the agent ever learns of one: the event name, for the wake hint (§7.5),
-// and the permission mode, for the release rule (§4.3).
+// Hook is what the loopback server learned of a hook, and all the agent ever
+// learns of one: the event name, for the wake hint (§7.5), and for the
+// release rule (§4.3) the permission mode, whether a subagent sent it and,
+// on a decide, which kind of session it came from.
 type Hook struct {
 	Event string
-	// Mode is `permission_mode`; ModeBubble marks a background subagent's
-	// prompt, which Claude Code shows in the terminal only once the hook
-	// returns without a decision.
+	// Mode is `permission_mode`.
 	Mode string
+	// Subagent is whether the body carries an `agent_id`, which Claude Code
+	// sets on every subagent's hooks and never on the main agent's. Only its
+	// presence is read, never its value.
+	Subagent bool
+	// Entrypoint is the decide hook's EntrypointHeader: EntrypointCLI for an
+	// interactive terminal session, `sdk-cli` for `claude -p`. Empty when the
+	// hooks block predates the header.
+	Entrypoint string
 }
 
-// ModeBubble is the permission mode of a bubbled prompt (an internal value
+// Bubbled reports whether Claude Code shows this decide in the terminal only
+// once the hook returns without a decision: a background subagent's prompt in
+// an interactive session (ADR 2026-10.gw8w). Its hooks run first, so while the
+// agent holds one the terminal is blind. Any other session has no such dialog
+// — in `claude -p` a hook without a decision is a denial — so only
+// EntrypointCLI, or no header at all, lets a subagent's decide through.
+func (h Hook) Bubbled() bool {
+	if h.Entrypoint != "" && h.Entrypoint != EntrypointCLI {
+		return false
+	}
+	return h.Subagent || h.Mode == ModeBubble
+}
+
+// ModeBubble is the permission mode some subagents report (an internal value
 // of Claude Code, observed on 2.1.278; NOTES.md in the phone repository).
+// Since 2.1.289 only an agent that declares it does, and only under a parent
+// in `default` mode, so `agent_id` is the marker that holds (ADR 2026-10.gw8w).
 const ModeBubble = "bubble"
+
+// EntrypointCLI is CLAUDE_CODE_ENTRYPOINT in an interactive terminal session,
+// the one kind whose background agents' prompts reach a terminal dialog.
+const EntrypointCLI = "cli"
 
 // Why the agent cancels a held decide (the cancel record's `reason`).
 const (

@@ -20,6 +20,21 @@ This file is a [Declarative Changelog](https://whatsnew.fyi/spec). It starts at 
 
 ## Unreleased
 
+### Fixed
+
+- Permission prompts from background agents now show in your terminal while you're at it,
+  whatever the session's permission mode or the agent's type. Before, only a forked agent in a
+  default-mode session got there. Any other agent's prompt, including every one in auto mode, waited
+  up to a day for your watch or phone with nothing in the terminal. When you're away, prompts still
+  go to your watch. ([#2](https://gitlab.invalid/clair/clair-agent/-/issues/2))
+
+### Changed
+
+- The permission hook in Claude Code's `settings.json` now passes the session's
+  `CLAUDE_CODE_ENTRYPOINT` to the agent, so a `claude -p` run's prompts stay on your watch: `-p` has
+  no terminal prompt to fall back to. An existing install gets the new hook the next time it's
+  written, when you pair again or change a hook setting in the phone app.
+
 ## [0.3.1](https://github.com/clair-app/clair-agent/releases/tag/v0.3.1) — 2026-09-28T03:44:45Z
 
 > A prompt nobody answers now shows as expired on the phone, and a first install no longer reports
