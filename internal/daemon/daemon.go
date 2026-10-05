@@ -37,6 +37,9 @@ type Installer interface {
 	// InstallSnippet writes a hooks block the phone sent (RELAY.md §6.5); a
 	// refused one leaves what is installed as it is.
 	InstallSnippet(snippet json.RawMessage) (claudecfg.SnippetReport, error)
+	// RefreshHooks rebuilds the Clair hooks already in settings.json from
+	// this binary's template (ADR 2026-10.sm5c).
+	RefreshHooks() (claudecfg.RefreshReport, error)
 	// Uninstall removes the hooks and the statusline once nothing is paired.
 	Uninstall() error
 }
@@ -149,6 +152,9 @@ func Run(ctx context.Context, o Options) error {
 	if loadErr := d.Reload(ctx); loadErr != nil {
 		d.log.Warn("pairs not loaded; hooks are answered locally until `clair pair`", "error", loadErr.Error())
 	}
+	if d.pairCount() > 0 {
+		d.refreshHooks()
+	}
 	serveDone := make(chan error, 1)
 	wg.Go(func() { serveDone <- srv.Serve(serveCtx, ln) })
 	// The updater only swaps a file; it stops with the daemon, whichever way
@@ -197,6 +203,8 @@ type daemon struct {
 	mu      sync.Mutex
 	clients map[string]tunnel.Relay
 	loaded  map[string]struct{}
+	// hooks is what the start's refresh did; nil until it ran.
+	hooks *ctl.HooksStatus
 
 	// Snippets are installed one at a time, latest first: next is the one
 	// waiting, installing says a caller is already draining it.
@@ -261,6 +269,9 @@ func (d *daemon) Status(context.Context) ctl.Status {
 		st.Presence = &ctl.Presence{IdleMs: s.Idle.Milliseconds(), Source: s.Source}
 	}
 	st.Update = d.updateStatus()
+	d.mu.Lock()
+	st.Hooks = d.hooks
+	d.mu.Unlock()
 	return st
 }
 
@@ -459,7 +470,37 @@ func (d *daemon) installSnippet(p *pendingSnippet) {
 		d.log.Info("snippet already installed", "pair", p.pairID)
 		return
 	}
-	d.log.Info("hooks rewritten from the phone's snippet; restart Claude Code", "pair", p.pairID)
+	d.log.Info("hooks rewritten from the phone's snippet", "pair", p.pairID, "backup", report.Backup)
+}
+
+// refreshHooks brings the hooks `clair pair` or a phone snippet wrote up to
+// this binary's template, once, at start. A release that changes the
+// template runs from the daemon's next start, and nothing else rewrites the
+// block until the phone's hook settings change (ADR 2026-10.sm5c). Claude
+// Code (2.1.289) reloads a rewritten settings.json in open sessions.
+func (d *daemon) refreshHooks() {
+	if d.opts.Installer == nil {
+		return
+	}
+	report, err := d.opts.Installer.RefreshHooks()
+	st := &ctl.HooksStatus{Groups: report.Groups}
+	switch {
+	case err != nil:
+		st.Outcome, st.Error = ctl.HooksFailed, err.Error()
+		d.log.Warn("hooks not refreshed; they stay as they were", "error", st.Error)
+	case report.Groups == 0:
+		st.Outcome = ctl.HooksNone
+		d.log.Warn("no Clair hooks in settings.json; Claude Code sends this agent nothing")
+	case report.Unchanged:
+		st.Outcome = ctl.HooksCurrent
+		d.log.Info("hooks match this agent's template", "groups", report.Groups)
+	default:
+		st.Outcome, st.Backup = ctl.HooksRewritten, report.Backup
+		d.log.Info("hooks rewritten to this agent's template", "groups", report.Groups, "backup", report.Backup)
+	}
+	d.mu.Lock()
+	d.hooks = st
+	d.mu.Unlock()
 }
 
 // onRevoked forgets a pair the phone ended with its sealed revoke, or the

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -81,6 +82,11 @@ type SnippetConfig struct {
 	// for SessionStart, so it is a `command` hook running `<ClairExe>
 	// hook-event`; empty renders an http hook instead.
 	ClairExe string
+
+	// anyClairExe accepts any Clair binary's hook-event command, not only
+	// ClairExe's: a refresh reads a command that whichever binary wrote it
+	// named, and writes this one's (ADR 2026-10.sm5c).
+	anyClairExe bool
 }
 
 // HookEventCommand is the SessionStart command hook: this binary forwarding
@@ -338,13 +344,68 @@ func (c SnippetConfig) rebuildHook(event string, hook *ojson.Object) (*ojson.Obj
 		return c.httpHook(path, timeout, ojson.AsString(status)), nil
 	case "command":
 		cmd, _ := hook.Get("command")
-		if decide || c.ClairExe == "" || ojson.AsString(cmd) != HookEventCommand(c.ClairExe) {
+		if decide || c.ClairExe == "" || !c.isHookEventCommand(ojson.AsString(cmd)) {
 			return nil, fmt.Errorf("%w: %s has a command hook other than %q", ErrSnippetRejected, event, HookEventCommand(c.ClairExe))
 		}
 		return commandHook(c.ClairExe), nil
 	default:
 		return nil, fmt.Errorf("%w: %s has a hook that is neither http nor this binary's hook-event", ErrSnippetRejected, event)
 	}
+}
+
+// isHookEventCommand reports whether a command hook is this binary's
+// hook-event; a refresh also takes another Clair binary's.
+func (c SnippetConfig) isHookEventCommand(cmd string) bool {
+	if cmd == HookEventCommand(c.ClairExe) {
+		return true
+	}
+	if !c.anyClairExe {
+		return false
+	}
+	exe, rest := splitCommand(cmd)
+	return rest == "hook-event "+record.PathEvent && (isClairName(exe) || sameFile(exe, c.ClairExe))
+}
+
+// refresh rebuilds every Clair group under an event the template hooks,
+// where it stands, as a phone snippet's would be rebuilt (ADR 2026-10.sm5c):
+// a hook keeps its endpoint, timeout and statusMessage and a group its
+// matcher, and the rest — headers, allowedEnvVars, the bearer, this binary's
+// path — is the template's. Nothing is added, removed or moved: the user's
+// groups stay where they are, and so do Clair's under an event the template
+// does not hook. It returns how many Clair groups it rebuilt; a group the
+// rebuild refuses stops the whole refresh.
+func refresh(settings *ojson.Object, c SnippetConfig) (int, error) {
+	hooksVal, _ := settings.Get("hooks")
+	events := ojson.AsObject(hooksVal)
+	if events == nil {
+		return 0, nil
+	}
+	c.anyClairExe = true
+	rebuilt := 0
+	for _, event := range events.Keys() {
+		if !knownEvent(event) {
+			continue
+		}
+		groupsVal, _ := events.Get(event)
+		groups := slices.Clone(ojson.AsArray(groupsVal))
+		ours := false
+		for i, g := range groups {
+			if !isClair(g) {
+				continue
+			}
+			grp, err := c.rebuildGroup(event, g)
+			if err != nil {
+				return 0, fmt.Errorf("claudecfg: the Clair hooks in settings.json cannot be rebuilt: %w", err)
+			}
+			groups[i] = grp
+			ours = true
+			rebuilt++
+		}
+		if ours {
+			events.Set(event, groups)
+		}
+	}
+	return rebuilt, nil
 }
 
 // maxSnippetBytes bounds a phone snippet before it is parsed: the phone's

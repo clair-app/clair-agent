@@ -12,6 +12,7 @@ import (
 	"testing/synctest"
 
 	"claircode.app/clair-agent/internal/claudecfg"
+	"claircode.app/clair-agent/internal/ctl"
 )
 
 // blockingInstaller holds its first install until released and records
@@ -31,6 +32,10 @@ func (b *blockingInstaller) InstallSnippet(s json.RawMessage) (claudecfg.Snippet
 		<-b.release
 	}
 	return claudecfg.SnippetReport{}, nil
+}
+
+func (*blockingInstaller) RefreshHooks() (claudecfg.RefreshReport, error) {
+	return claudecfg.RefreshReport{}, nil
 }
 
 func (*blockingInstaller) Uninstall() error { return nil }
@@ -57,17 +62,75 @@ func TestSnippetsInstallOneAtATimeLatestLast(t *testing.T) {
 	})
 }
 
-// reportingInstaller answers every snippet with the same report.
+// reportingInstaller answers every snippet, and every refresh, with the same
+// report.
 type reportingInstaller struct {
-	report claudecfg.SnippetReport
-	err    error
+	report  claudecfg.SnippetReport
+	refresh claudecfg.RefreshReport
+	err     error
 }
 
 func (r reportingInstaller) InstallSnippet(json.RawMessage) (claudecfg.SnippetReport, error) {
 	return r.report, r.err
 }
 
+func (r reportingInstaller) RefreshHooks() (claudecfg.RefreshReport, error) {
+	return r.refresh, r.err
+}
+
 func (reportingInstaller) Uninstall() error { return nil }
+
+// What the start's refresh found is in the log and in the status: rewritten
+// with its backup, already current, no Clair hook at all, or refused.
+func TestHookRefreshOutcomes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		inst reportingInstaller
+		want ctl.HooksStatus
+		log  string
+	}{
+		{
+			name: "rewritten",
+			inst: reportingInstaller{refresh: claudecfg.RefreshReport{Report: claudecfg.Report{Backup: "settings.json.bak-1"}, Groups: 9}},
+			want: ctl.HooksStatus{Outcome: ctl.HooksRewritten, Groups: 9, Backup: "settings.json.bak-1"},
+			log:  "hooks rewritten to this agent's template",
+		},
+		{
+			name: "current",
+			inst: reportingInstaller{refresh: claudecfg.RefreshReport{Report: claudecfg.Report{Unchanged: true}, Groups: 9}},
+			want: ctl.HooksStatus{Outcome: ctl.HooksCurrent, Groups: 9},
+			log:  "hooks match this agent's template",
+		},
+		{
+			name: "none",
+			inst: reportingInstaller{refresh: claudecfg.RefreshReport{Report: claudecfg.Report{Unchanged: true}}},
+			want: ctl.HooksStatus{Outcome: ctl.HooksNone},
+			log:  "no Clair hooks in settings.json",
+		},
+		{
+			name: "refused",
+			inst: reportingInstaller{err: claudecfg.ErrSnippetRejected},
+			want: ctl.HooksStatus{Outcome: ctl.HooksFailed, Error: claudecfg.ErrSnippetRejected.Error()},
+			log:  "hooks not refreshed; they stay as they were",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var log bytes.Buffer
+			d := &daemon{opts: Options{Installer: tt.inst}, log: slog.New(slog.NewTextHandler(&log, nil))}
+			d.refreshHooks()
+			if d.hooks == nil || *d.hooks != tt.want {
+				t.Errorf("hooks status = %+v, want %+v", d.hooks, tt.want)
+			}
+			if !strings.Contains(log.String(), tt.log) {
+				t.Errorf("log lacks %q:\n%s", tt.log, log.String())
+			}
+		})
+	}
+}
 
 // What an install left out, refused or found already in place is in the
 // log, and a refused snippet is not reported as written.

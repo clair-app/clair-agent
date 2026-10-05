@@ -267,6 +267,7 @@ func printStatus(w io.Writer, st ctl.Status) {
 		fmt.Fprintln(w, "terminal input: no signal — subagent prompts are never handed to the terminal")
 	}
 	printUpdateStatus(w, st.Update)
+	printHooksStatus(w, st.Hooks)
 	if !st.Paired {
 		if st.Unpaired != "" {
 			fmt.Fprintf(w, "not paired (%s) — run `clair pair`\n", st.Unpaired)
@@ -293,6 +294,25 @@ func printStatus(w io.Writer, st ctl.Status) {
 		} else {
 			fmt.Fprintln(w, "  subagent prompts are always held for the phone")
 		}
+	}
+}
+
+// printHooksStatus says what the agent's start did to the hooks in
+// settings.json (ADR 2026-10.sm5c); nothing from an agent older than that,
+// or one that started unpaired.
+func printHooksStatus(w io.Writer, h *ctl.HooksStatus) {
+	if h == nil {
+		return
+	}
+	switch h.Outcome {
+	case ctl.HooksRewritten:
+		fmt.Fprintf(w, "hooks: updated to this agent's version at start (%d groups); the previous settings.json is at %s\n", h.Groups, h.Backup)
+	case ctl.HooksCurrent:
+		fmt.Fprintf(w, "hooks: up to date with this agent's version (%d groups, checked at start)\n", h.Groups)
+	case ctl.HooksNone:
+		fmt.Fprintln(w, "hooks: none in settings.json at start, so Claude Code sends this agent nothing; `clair pair --replace` installs them")
+	case ctl.HooksFailed:
+		fmt.Fprintf(w, "hooks: not updated at start, and left as they are (%s)\n", h.Error)
 	}
 }
 

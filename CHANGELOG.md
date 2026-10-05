@@ -20,6 +20,15 @@ This file is a [Declarative Changelog](https://whatsnew.fyi/spec). It starts at 
 
 ## Unreleased
 
+### Added
+
+- New hook settings now reach an existing install without pairing again. When the agent starts, it
+  brings its own hooks in Claude Code's `settings.json` up to date with its version and keeps the hook
+  settings you chose in the phone app. Your own hooks and the rest of the file stay as they are,
+  Clair hooks you removed aren't added back, and the file is backed up before any change.
+  `clair status` shows what the agent found. Claude Code 2.1.289 applies the change to open sessions
+  without a restart.
+
 ### Fixed
 
 - Permission prompts from background agents now show in your terminal while you're at it,
@@ -32,8 +41,8 @@ This file is a [Declarative Changelog](https://whatsnew.fyi/spec). It starts at 
 
 - The permission hook in Claude Code's `settings.json` now passes the session's
   `CLAUDE_CODE_ENTRYPOINT` to the agent, so a `claude -p` run's prompts stay on your watch: `-p` has
-  no terminal prompt to fall back to. An existing install gets the new hook the next time it's
-  written, when you pair again or change a hook setting in the phone app.
+  no terminal prompt to fall back to. An existing install gets the new hook the next time the agent
+  starts.
 
 ## [0.3.1](https://github.com/clair-app/clair-agent/releases/tag/v0.3.1) — 2026-09-28T03:44:45Z
 

@@ -66,7 +66,37 @@ type Status struct {
 	Presence *Presence `json:"presence,omitempty"`
 	// Update is the self-updater's state; nil from a daemon older than it.
 	Update *UpdateStatus `json:"update,omitempty"`
+	// Hooks is what the start's refresh of settings.json found (ADR
+	// 2026-10.sm5c); nil from a daemon older than it, or one that started
+	// unpaired.
+	Hooks *HooksStatus `json:"hooks,omitempty"`
 }
+
+// HooksStatus is the outcome of the daemon's refresh, at start, of the Clair
+// hooks in settings.json.
+type HooksStatus struct {
+	// Outcome is one of the Hooks* constants.
+	Outcome string `json:"outcome"`
+	// Groups is how many Clair hook groups settings.json held.
+	Groups int `json:"groups,omitempty"`
+	// Backup is where settings.json was copied before it was rewritten.
+	Backup string `json:"backup,omitempty"`
+	// Error is why the hooks could not be rebuilt; they stay as they were.
+	Error string `json:"error,omitempty"`
+}
+
+// Hook refresh outcomes.
+const (
+	// HooksRewritten is a block brought up to this agent's template.
+	HooksRewritten = "rewritten"
+	// HooksCurrent is a block already as this agent's template writes it.
+	HooksCurrent = "current"
+	// HooksNone is a settings.json without a Clair hook.
+	HooksNone = "none"
+	// HooksFailed is a block the rebuild refused, or a settings.json it
+	// could not read or write (HooksStatus.Error).
+	HooksFailed = "failed"
+)
 
 // UpdateStatus is what the daemon knows about releases (ADR 2026-09.qk6v).
 type UpdateStatus struct {

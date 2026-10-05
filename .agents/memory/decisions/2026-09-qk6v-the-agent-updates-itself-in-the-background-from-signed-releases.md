@@ -8,7 +8,7 @@ topics: [install, release, daemon, security]
 
 # ADR 2026-09.qk6v — The agent updates itself in the background from signed releases, and the new binary runs at the next restart
 
-Status: Accepted (2026-09-24); the swap checked for real on macOS (ADR 2026-09.c93f) and on Windows 11 with Defender on (ADR 2026-09.6w38)
+Status: Accepted (2026-09-24); the swap checked for real on macOS (ADR 2026-09.c93f) and on Windows 11 with Defender on (ADR 2026-09.6w38); the hooks block migrates itself at start since ADR 2026-10.sm5c
 
 **What was observed.** Upgrading meant re-running `install.sh` or `install.ps1`, which swap the
 binary and restart the service (clair-web ADR 2026-09.e7ky). Nobody re-runs an installer, so every

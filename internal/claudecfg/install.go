@@ -67,10 +67,16 @@ func runsStatuslineOf(command, exe string) bool {
 		return false
 	}
 	first, rest := splitCommand(command)
-	if rest != "statusline" || first == "" {
+	return rest == "statusline" && sameFile(first, exe)
+}
+
+// sameFile reports whether path names the file exe is, however it was spelt
+// or linked.
+func sameFile(path, exe string) bool {
+	if path == "" || exe == "" {
 		return false
 	}
-	a, err := os.Stat(first) //nolint:gosec // only compared with our own executable, never opened
+	a, err := os.Stat(path) //nolint:gosec // only compared with our own executable, never opened
 	if err != nil {
 		return false
 	}
@@ -133,7 +139,7 @@ type Report struct {
 	// Backup is the path settings.json was copied to, or "" when there was none.
 	Backup string
 	// StatusLine is wrapped, kept (not a command; left alone), restored,
-	// removed or none.
+	// removed or none; empty when the edit never looks at it (a refresh).
 	StatusLine string
 	// Unchanged is an edit that found settings.json already as it would have
 	// written it: nothing was written and nothing backed up.
@@ -170,6 +176,8 @@ type current struct {
 // unpair` — never lose each other's changes or the user's (ADR 2026-09.y34x).
 // An edit that changes nothing writes nothing: the phone may send the same
 // snippet again, and each would otherwise leave a backup (ADR 2026-09.bckr).
+// Nor does one that leaves a missing file empty: a refresh or an uninstall
+// on a host without settings.json creates none (ADR 2026-10.sm5c).
 func (in Installer) edit(change func(*ojson.Object) (string, error)) (Report, error) {
 	unlock, err := in.lock()
 	if err != nil {
@@ -189,6 +197,9 @@ func (in Installer) edit(change func(*ojson.Object) (string, error)) (Report, er
 			report.Unchanged = true
 			return report, nil
 		}
+	} else if settings.Len() == 0 {
+		report.Unchanged = true
+		return report, nil
 	}
 	report.Backup, err = in.save(cur, settings)
 	return report, err
@@ -490,6 +501,30 @@ func (s SnippetInstaller) InstallAtPairing(snippet json.RawMessage) (SnippetRepo
 	}
 	fallback, ferr := s.InstallDefault()
 	return SnippetReport{Report: fallback, Refused: err}, ferr
+}
+
+// RefreshReport says what a refresh did.
+type RefreshReport struct {
+	Report
+
+	// Groups is how many Clair hook groups settings.json holds under events
+	// the template hooks; with none, nothing was written.
+	Groups int
+}
+
+// RefreshHooks rebuilds the Clair hooks already in settings.json from this
+// binary's template where they stand, adding none and leaving the statusLine
+// and everything else alone, so a release that changes the template reaches
+// a host without a re-pair or a new snippet (ADR 2026-10.sm5c). A block the
+// rebuild refuses is an error and stays as it was.
+func (s SnippetInstaller) RefreshHooks() (RefreshReport, error) {
+	groups := 0
+	report, err := s.edit(func(settings *ojson.Object) (string, error) {
+		var err error
+		groups, err = refresh(settings, s.config())
+		return "", err
+	})
+	return RefreshReport{Report: report, Groups: groups}, err
 }
 
 // Uninstall removes the hooks and restores the statusLine.

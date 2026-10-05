@@ -9,7 +9,8 @@ topics: [presence, hooks, tunnel]
 # ADR 2026-10.gw8w — A decide is a background agent's when its hook carries agent_id in an interactive session, as the decide hook's entrypoint header tells
 
 Status: Accepted (2026-10-05) · GitLab clair-agent#2; widens ADR 2026-09.34qh's `bubble` marker, and
-gives the decide hook the one `allowedEnvVars` ADR 2026-09.ut2g had ruled out. RELAY.md r12 §4.3.
+gives the decide hook the one `allowedEnvVars` ADR 2026-09.ut2g had ruled out. RELAY.md r12 §4.3. Amended by
+ADR 2026-10.sm5c: an existing install gets the header at the daemon's next start.
 
 **What was observed.** On 2026-10-05 (the maintainer's workstation, Claude Code 2.1.289, an auto-mode session) a background
 `mesh-lab-reviewer` agent asked to run a `Bash` command. Its hook said `permission_mode: "auto"`, so
@@ -62,9 +63,9 @@ Telling the session apart through `SessionStart` was not taken: its `command` ho
 and the decide hook gains its first `allowedEnvVars`, for one fixed, non-secret variable in a header
 that stays on the host. `agent_id`, `CLAUDE_CODE_ENTRYPOINT` and its values are undocumented; if a
 release stops setting either, the agent holds, which is the behaviour this ADR replaces, not a denial.
-The `-p` guard reaches an existing install only when its hooks block is next written: `clair pair`, or a
-`snippet` the phone sends when its hook settings change. Until then such an install releases a `-p`
-subagent's decide while someone is at a terminal. An interactive session launched with another preset
+The `-p` guard reaches an existing install when the daemon next starts and rebuilds its hooks block from
+this template (ADR 2026-10.sm5c). Where that rebuild is refused, or Claude Code reads another
+`settings.json`, the install still releases a `-p` subagent's decide while someone is at a terminal. An interactive session launched with another preset
 (an IDE that sets the variable) keeps today's hold. A foreground subagent's raced prompt is released
 too, which costs only the watch's copy while someone is at the terminal. Internal forks (compaction,
 memory extraction and the like) also carry an `agent_id`; whether any of them ever reaches

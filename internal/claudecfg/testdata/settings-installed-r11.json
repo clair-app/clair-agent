@@ -1,0 +1,98 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "guard.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:7317/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer t0k3n",
+              "X-Clair-Host": "walter-laptop"
+            },
+            "timeout": 2
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "log-tool.sh"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:7317/clair/v1/hook/decide?timeout=600",
+            "headers": {
+              "Authorization": "Bearer t0k3n",
+              "X-Clair-Host": "walter-laptop"
+            },
+            "timeout": 600,
+            "statusMessage": "Clair: also on your watch…"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:7317/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer t0k3n",
+              "X-Clair-Host": "walter-laptop"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:7317/clair/v1/hook/event",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/walter/bin/clair-linux-amd64 hook-event /clair/v1/hook/event"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "my-status"
+  }
+}

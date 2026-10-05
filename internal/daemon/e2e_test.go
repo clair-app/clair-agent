@@ -34,6 +34,7 @@ const pairID = "AAAAAAAAAAAAAAAAAAAAAA"
 type installer struct {
 	mu        sync.Mutex
 	snippets  [][]byte
+	refreshes int
 	uninstall int
 }
 
@@ -42,6 +43,20 @@ func (i *installer) InstallSnippet(s json.RawMessage) (claudecfg.SnippetReport, 
 	defer i.mu.Unlock()
 	i.snippets = append(i.snippets, bytes.Clone(s))
 	return claudecfg.SnippetReport{}, nil
+}
+
+// RefreshHooks finds an older block of nine groups and rewrites it.
+func (i *installer) RefreshHooks() (claudecfg.RefreshReport, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.refreshes++
+	return claudecfg.RefreshReport{Report: claudecfg.Report{Backup: "settings.json.bak-1"}, Groups: 9}, nil
+}
+
+func (i *installer) refreshCount() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.refreshes
 }
 
 func (i *installer) Uninstall() error {
@@ -685,6 +700,47 @@ func TestControlStopShutsDownCleanly(t *testing.T) {
 	}
 	if _, err := control.Status(ctx); !errors.Is(err, ctl.ErrUnreachable) {
 		t.Errorf("status after the stop: %v, want ctl.ErrUnreachable", err)
+	}
+}
+
+// A paired daemon brings the hooks block up to its own template once, as it
+// starts, and says what it found; an unpaired one leaves settings.json alone
+// (ADR 2026-10.sm5c).
+func TestStartRefreshesTheHooksOfAPairedHost(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	ctx := t.Context()
+	control := &ctl.Client{Base: "http://" + w.addr, AdminToken: w.agent.AdminToken}
+	st, err := control.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	want := ctl.HooksStatus{Outcome: ctl.HooksRewritten, Groups: 9, Backup: "settings.json.bak-1"}
+	if st.Hooks == nil || *st.Hooks != want {
+		t.Errorf("status hooks = %+v, want %+v", st.Hooks, want)
+	}
+	if got := w.inst.refreshCount(); got != 1 {
+		t.Errorf("refreshes at start = %d, want 1", got)
+	}
+	w.stop()
+	if err := <-w.done; err != nil {
+		t.Fatalf("daemon.Run: %v", err)
+	}
+
+	if err := w.dir.DeletePair(pairID); err != nil {
+		t.Fatal(err)
+	}
+	w.start(t)
+	if st, err := (&ctl.Client{Base: "http://" + w.addr, AdminToken: w.agent.AdminToken}).Status(ctx); err != nil || st.Hooks != nil {
+		t.Errorf("unpaired status = %+v, %v; want no hooks refresh", st.Hooks, err)
+	}
+	if got := w.inst.refreshCount(); got != 1 {
+		t.Errorf("refreshes after an unpaired start = %d, want still 1", got)
+	}
+	w.stop()
+	if err := <-w.done; err != nil {
+		t.Fatalf("daemon.Run: %v", err)
 	}
 }
 

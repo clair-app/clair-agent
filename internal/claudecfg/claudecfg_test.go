@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -930,6 +931,143 @@ func TestInstallAtPairing(t *testing.T) {
 			hooks.Set("hooks", mustGet(t, readSettings(t, in), "hooks"))
 			if got := compact(t, hooks); !strings.Contains(tt.name, "does not hook") && got != builtIn {
 				t.Errorf("hooks =\n%s\nwant the built-in block\n%s", got, builtIn)
+			}
+		})
+	}
+}
+
+func refresher(t *testing.T, before string) SnippetInstaller {
+	t.Helper()
+	return SnippetInstaller{Installer: fixture(t, before), BaseURL: baseURL, Port: 7317, Token: "t0k3n", Host: "walter-laptop"}
+}
+
+// A block written before the template changed takes the template's headers
+// and options where it stands, keeping what the phone chose and the user's
+// own hooks, order and statusLine; a second refresh finds nothing to do.
+func TestRefreshHooksBringsAnOlderBlockToTheTemplate(t *testing.T) {
+	t.Parallel()
+
+	before, err := os.ReadFile("testdata/settings-installed-r11.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile("testdata/settings-refreshed.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	si := refresher(t, string(before))
+	report, err := si.RefreshHooks()
+	if err != nil {
+		t.Fatalf("RefreshHooks: %v", err)
+	}
+	if report.Groups != 4 || report.Unchanged || report.Backup == "" || report.StatusLine != "" {
+		t.Errorf("report = %+v, want 4 groups rewritten with a backup and the statusLine untouched", report)
+	}
+	if got, _ := os.ReadFile(si.SettingsPath); !bytes.Equal(got, want) {
+		t.Errorf("settings.json =\n%s\nwant\n%s", got, want)
+	}
+	if saved, _ := os.ReadFile(report.Backup); !bytes.Equal(saved, before) {
+		t.Errorf("backup =\n%s\nwant the file as it was", saved)
+	}
+	if _, statErr := os.Stat(si.originalPath()); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("original.json: %v, want none: a refresh never wraps the statusLine", statErr)
+	}
+
+	again, err := si.RefreshHooks()
+	if err != nil || !again.Unchanged || again.Backup != "" || again.Groups != 4 {
+		t.Errorf("second RefreshHooks = %+v, %v; want 4 groups unchanged", again, err)
+	}
+	if got := backups(t, si.Installer); len(got) != 1 {
+		t.Errorf("backups = %v, want only the first refresh's", got)
+	}
+}
+
+// The SessionStart command names whichever binary wrote it; a refresh takes
+// any Clair binary's, under any name it is linked by, and writes this one's.
+func TestRefreshHooksTakesThisBinaryUnderAnyName(t *testing.T) {
+	t.Parallel()
+
+	si := refresher(t, "")
+	si.ClairExe = selfExe(t, "cl")
+	linked := filepath.Join(t.TempDir(), "other-name")
+	if err := os.Symlink(si.ClairExe, linked); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	settings := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":` + strconv.Quote(HookEventCommand(linked)) + `}]}]}}`
+	if err := os.WriteFile(si.SettingsPath, []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := si.RefreshHooks()
+	if err != nil || report.Groups != 1 || report.Unchanged {
+		t.Fatalf("RefreshHooks = %+v, %v; want the one group rewritten", report, err)
+	}
+	hooks := ojson.AsObject(mustGet(t, readSettings(t, si.Installer), "hooks"))
+	want := `[{"hooks":[{"type":"command","command":` + strconv.Quote(HookEventCommand(si.ClairExe)) + `}]}]`
+	if got := compact(t, mustGet(t, hooks, "SessionStart")); got != want {
+		t.Errorf("SessionStart = %s, want %s", got, want)
+	}
+}
+
+// With no Clair hook in settings.json — never installed, or removed by hand —
+// a refresh writes nothing, and never creates the file.
+func TestRefreshHooksLeavesAHostWithoutClairHooksAlone(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct{ name, settings string }{
+		{name: "no settings.json"},
+		{name: "only the user's hooks", settings: `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}`},
+		{name: "no hooks at all", settings: `{"model":"opus"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			si := refresher(t, tt.settings)
+			report, err := si.RefreshHooks()
+			if err != nil || report.Groups != 0 || !report.Unchanged || report.Backup != "" {
+				t.Errorf("RefreshHooks = %+v, %v; want 0 groups, unchanged", report, err)
+			}
+			got, err := os.ReadFile(si.SettingsPath)
+			if tt.settings == "" {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("settings.json = %q (%v), want none", got, err)
+				}
+				return
+			}
+			if string(got) != tt.settings {
+				t.Errorf("settings.json = %s, want it as it was", got)
+			}
+		})
+	}
+}
+
+// A Clair group the rebuild refuses — another port, a hook of the user's in
+// the same group, a hook-event that no Clair binary runs — leaves the whole
+// file as it was.
+func TestRefreshHooksRefusesWhatItCannotRebuild(t *testing.T) {
+	t.Parallel()
+
+	ours := `{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","timeout":2}`
+	for _, tt := range []struct{ name, group string }{
+		{name: "another port", group: `{"hooks":[{"type":"http","url":"http://127.0.0.1:7318/clair/v1/hook/event","timeout":2}]}`},
+		{name: "a user's hook in the group", group: `{"hooks":[` + ours + `,{"type":"command","command":"say done"}]}`},
+		{name: "the LAN installer's curl", group: `{"hooks":[{"type":"command","command":"curl -s --data-binary @- http://192.168.1.5:7317/clair/v1/hook/event"}]}`},
+		{name: "another program's hook-event", group: `{"hooks":[{"type":"command","command":"/usr/bin/env hook-event /clair/v1/hook/event"}]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			event := "Stop"
+			if strings.Contains(tt.group, `"command"`) && !strings.Contains(tt.group, ours) {
+				event = "SessionStart"
+			}
+			settings := `{"hooks":{"PreToolUse":[{"hooks":[` + ours + `]}],"` + event + `":[` + tt.group + `]}}`
+			si := refresher(t, settings)
+			if _, err := si.RefreshHooks(); !errors.Is(err, ErrSnippetRejected) {
+				t.Errorf("RefreshHooks: err = %v, want ErrSnippetRejected", err)
+			}
+			if got, _ := os.ReadFile(si.SettingsPath); string(got) != settings {
+				t.Errorf("settings.json = %s, want it as it was", got)
+			}
+			if got := backups(t, si.Installer); len(got) != 0 {
+				t.Errorf("backups = %v, want none", got)
 			}
 		})
 	}

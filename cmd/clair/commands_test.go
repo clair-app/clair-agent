@@ -182,6 +182,32 @@ func TestPrintStatus(t *testing.T) {
 	if !strings.Contains(out.String(), "subagent prompts are always held for the phone") {
 		t.Errorf("rule-off output:\n%s", out.String())
 	}
+	if strings.Contains(out.String(), "hooks:") {
+		t.Errorf("an agent that reports no hooks refresh got a hooks line:\n%s", out.String())
+	}
+}
+
+func TestPrintHooksStatus(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		hooks ctl.HooksStatus
+		want  string
+	}{
+		{ctl.HooksStatus{Outcome: ctl.HooksRewritten, Groups: 9, Backup: "/h/.claude/settings.json.bak-1"}, "hooks: updated to this agent's version at start (9 groups); the previous settings.json is at /h/.claude/settings.json.bak-1"},
+		{ctl.HooksStatus{Outcome: ctl.HooksCurrent, Groups: 9}, "hooks: up to date with this agent's version (9 groups, checked at start)"},
+		{ctl.HooksStatus{Outcome: ctl.HooksNone}, "hooks: none in settings.json at start"},
+		{ctl.HooksStatus{Outcome: ctl.HooksFailed, Error: "disk full"}, "hooks: not updated at start, and left as they are (disk full)"},
+	} {
+		t.Run(tt.hooks.Outcome, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			printStatus(&out, ctl.Status{Paired: true, Hooks: &tt.hooks})
+			if !strings.Contains(out.String(), tt.want) {
+				t.Errorf("printStatus output lacks %q:\n%s", tt.want, out.String())
+			}
+		})
+	}
 }
 
 // scanAsPhone waits for `clair pair` to print its link, then completes the
