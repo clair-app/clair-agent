@@ -8,7 +8,10 @@ trim_trailing_whitespace = true
 indent_style = space
 indent_size = 2
 
-# gofmt owns Go: tabs, and it decides the width.
+# gofmt owns Go: tabs, and it decides the width. editorconfig-checker skips *.go
+# (.editorconfig-checker.json) because `make fmt-check` already proves everything it would,
+# and the one place gofmt leaves alone, a raw-string usage text, is indented with spaces
+# on purpose: that is how it prints.
 [{*.go,go.mod,go.sum}]
 indent_style = tab
 indent_size = 4
@@ -19,3 +22,13 @@ indent_style = tab
 [*.md]
 # Two trailing spaces are a hard line break in Markdown.
 trim_trailing_whitespace = false
+# Indentation is structure, not style: two spaces under a `-`, three under a `1.`.
+indent_size = unset
+
+# Goldens are the renderers' output, compared byte for byte (.gitattributes): a test owns
+# their bytes, so an editor must not "fix" them on save. launchd's plists are tab-indented.
+[**/testdata/**]
+indent_style = unset
+indent_size = unset
+trim_trailing_whitespace = unset
+insert_final_newline = unset

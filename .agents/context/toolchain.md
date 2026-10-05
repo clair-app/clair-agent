@@ -48,6 +48,23 @@ enabled or deprecated (the config is explicit, so nothing enables itself), commi
   host. golangci-lint loads only the files the build tags select, so a single run would
   never type-check a `_windows.go` file or a `_darwin_test.go` on a Linux machine or in CI.
 
+## Linting everything else (lintorama)
+
+A Claude Code Stop hook (`.claude/settings.json` → `.claude/hooks/lintorama-stop.sh`) runs the
+`zaventh/lintorama:9` image over every tracked file before a turn ends: yamllint, mdl,
+ShellCheck, the JSON syntax check and editorconfig-checker, among others. Findings block the
+stop once, then the turn may end; without docker, or offline with no cached image, it skips.
+It is the same hook lintorama itself, clair, clair-server and clair-web run. CI does not run it.
+
+| Config | What it sets |
+| --- | --- |
+| `.mdlrc` → `.mdl-style.rb` | The house mdl style, shared with clair-server and clair-web: `all` minus whitespace, line length and a few named rules |
+| `.yamllint` | `relaxed`, no line length |
+| `.editorconfig` | What editorconfig-checker enforces. Markdown's indent width and `testdata/` goldens are `unset` |
+| `.editorconfig-checker.json` | Skips `*.go`: gofumpt owns Go, and raw-string usage texts are space-indented on purpose |
+
+Bump the image's major tag in the hook script, then fix whatever the new version finds.
+
 ## Dependencies (`depguard`)
 
 `list-mode: strict` with `$gostd`, this module, `golang.org/x` and `rsc.io/qr` allowed.

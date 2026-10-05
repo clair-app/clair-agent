@@ -25,6 +25,7 @@ installed; and every install rewrote `settings.json` and left a new `.bak-*` eve
 changed, which matters now that the phone re-sends an unconfirmed snippet (fix D5).
 
 **What changed.**
+
 - Substitution escapes every value for the JSON string it lands in (`jsonEscape`, after
   `quoteForShell` for `__CLAIR_EXE__`). Parsing first and substituting in the parsed strings
   was the alternative; escaping keeps `Substitute`'s shape and gives the same result for the

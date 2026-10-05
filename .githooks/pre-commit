@@ -30,12 +30,12 @@ paths='.agents/memory/decisions.md .agents/memory/decisions/'
 # Nothing staged under either path — not an ADR commit.
 # shellcheck disable=SC2086  # $paths is two pathspecs; the split is what git wants
 if [ -z "$(git diff --cached --name-only -- $paths)" ]; then
-	exit 0
+  exit 0
 fi
 
 if ! command -v go >/dev/null 2>&1; then
-	echo "pre-commit: no go on PATH, skipping the ADR router check (CI still runs it)." >&2
-	exit 0
+  echo "pre-commit: no go on PATH, skipping the ADR router check (CI still runs it)." >&2
+  exit 0
 fi
 
 # Unquoted on purpose, here and above: $paths is two pathspecs, and $staged is a list
@@ -43,8 +43,8 @@ fi
 # shellcheck disable=SC2086
 staged=$(git ls-files --cached -- $paths)
 if [ -z "$staged" ]; then
-	# Every decision file is staged for deletion. Nothing left to index against.
-	exit 0
+  # Every decision file is staged for deletion. Nothing left to index against.
+  exit 0
 fi
 
 tmp=$(mktemp -d)
@@ -56,9 +56,9 @@ git checkout-index --prefix="$tmp/" -f -- $staged
 # `-C` points the tool at the extracted copies; without it, it would walk up from the
 # cwd to this repo's go.mod and index the working tree it was invoked from.
 if ! (cd "$repo" && go run ./tools/adr -C "$tmp" index -check); then
-	echo >&2
-	echo "pre-commit: the staged ADR router is out of sync with the staged ADRs." >&2
-	echo "  run:  go run ./tools/adr index" >&2
-	echo "  then: git add .agents/memory/decisions.md" >&2
-	exit 1
+  echo >&2
+  echo "pre-commit: the staged ADR router is out of sync with the staged ADRs." >&2
+  echo "  run:  go run ./tools/adr index" >&2
+  echo "  then: git add .agents/memory/decisions.md" >&2
+  exit 1
 fi

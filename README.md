@@ -37,7 +37,7 @@ overrides): `agent.json` (the loopback bearer, the admin token, the relay URL; `
 false` stops the background update check), `host.key`, and one `pairs/<id>.json` per pair. Flags: `-config-dir`, `-log-level`, `-relay`, `-relay-ca`;
 `clair pair` adds `-qr unicode|ascii|none`, `-invert`, `-replace`, `-yes`.
 
-### Running as a service
+## Running as a service
 
 `clair service install` registers **this binary, where it is**, as a service of the current user
 and starts it: a systemd user unit on Linux (logs: `journalctl --user -u clair`), a LaunchAgent

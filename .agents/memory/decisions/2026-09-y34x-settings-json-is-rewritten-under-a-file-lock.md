@@ -26,6 +26,7 @@ saved the agent's own command as the user's "original", and `clair statusline` r
 about 70 processes every 0.2 s, still growing after the top one was killed.
 
 **What changed.**
+
 - Every `Install` and `Uninstall` is one load-modify-save under an advisory lock on
   `settings.json.lock` beside the file: `flock` on Unix, `LockFileEx` on Windows through
   `golang.org/x/sys/windows`. Both lock per open file, so the daemon's goroutines exclude each

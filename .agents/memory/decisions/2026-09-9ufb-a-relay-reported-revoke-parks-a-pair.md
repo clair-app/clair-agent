@@ -19,6 +19,7 @@ operator, or a single relay bug (a misrouted deploy answering `404`) could there
 every host at once, and every host would have to scan a new QR.
 
 **What changed.**
+
 - The only authenticated end of a pair is the phone's sealed `revoke` control record, and it
   still ends the pair at once.
 - `event: revoked`, a `410` or a `404` on the stream or an upload now *parks* the pair

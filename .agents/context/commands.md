@@ -21,6 +21,16 @@ fastest:
 Then `make build` and `bin/clair version` if the change touches `cmd/clair` or the
 linker-injected version.
 
+`make check` covers the Go. The Markdown, YAML, shell and JSON around it are lintorama's,
+which Claude Code's Stop hook runs at the end of every turn (toolchain.md). To run it by hand:
+
+```sh
+gitdir=$(git rev-parse --path-format=absolute --git-common-dir)
+docker run --rm -v "$PWD":/code -v "$gitdir":"$gitdir" zaventh/lintorama:9
+```
+
+It lints only tracked files, so `git add -N` a new file first.
+
 ## Everything else
 
 | Target | Purpose |
