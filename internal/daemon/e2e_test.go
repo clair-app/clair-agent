@@ -418,9 +418,10 @@ func TestEndToEnd(t *testing.T) {
 	// host, whose stream drains it before `revoked`: hooks and the host key
 	// go, the daemon keeps answering locally, and the relay is told too
 	// (alone, the DELETE would only park the pair:
-	// TestRelayOnlyRevokeKeepsTheHostsState).
+	// TestRelayOnlyRevokeKeepsTheHostsState). The daemon may drain the
+	// revoke and DELETE first, and then the phone's own DELETE is a 410.
 	w.phone.send(ctx, record.Record{Kind: record.KindControl, Control: record.ControlRevoke})
-	if err := w.phone.client.Revoke(ctx, pairID); err != nil {
+	if err := w.phone.client.Revoke(ctx, pairID); err != nil && !errors.Is(err, relay.ErrRevoked) {
 		t.Fatalf("phone revoke: %v", err)
 	}
 	waitFor(t, func() bool {
