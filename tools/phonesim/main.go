@@ -97,11 +97,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 // snippet is the hooks block a phone would send: the agent's own shape with
-// the placeholders of RELAY.md §6.5.
+// the placeholders of RELAY.md §6.5, less the events only the agent writes
+// (ADR 2026-10.ukr9).
 func snippet() (json.RawMessage, error) {
 	hooks := claudecfg.RenderHooks(claudecfg.SnippetConfig{
 		BaseURL: "http://127.0.0.1:" + claudecfg.PlaceholderPort, Token: claudecfg.PlaceholderToken,
 		Host: claudecfg.PlaceholderHost, IncludeSessionStart: true, ClairExe: claudecfg.PlaceholderExe,
+		OmitAgentEvents: true,
 	})
 	var buf strings.Builder
 	if err := writeCompact(&buf, hooks); err != nil {

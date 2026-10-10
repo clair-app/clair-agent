@@ -11,7 +11,8 @@ topics: [hooks, claudecfg, daemon]
 Status: Accepted (2026-10-05) · implements, for the hooks block, ADR 2026-09.qk6v's "a release that changes the
 hooks block must migrate it itself when it starts" · amends ADR 2026-10.gw8w (how an existing install gets the
 entrypoint header) and ADR 2026-09.bckr (an edit that leaves a missing file empty writes nothing). RELAY.md r12
-§6.5.
+§6.5. · amended by ADR 2026-10.ukr9 (a refresh adds the agent's own events, `PostToolBatch`, to a block with Clair's
+decide hook: the template's first new event, answering "Not covered" below)
 
 **What was observed.** ADR 2026-10.gw8w gave the decide hook `X-Clair-Entrypoint: $CLAUDE_CODE_ENTRYPOINT` and its
 one `allowedEnvVars`. The agent's template adds them (`httpHook`); the phone's template does not. A host's hooks

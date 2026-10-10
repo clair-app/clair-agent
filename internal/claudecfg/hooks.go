@@ -65,6 +65,25 @@ var eventHooks = []struct{ event, matcher string }{
 	{"SessionEnd", ""},
 }
 
+// agentEvents are fire-and-forget events the agent hooks itself, which the
+// phone's template does not list (ADR 2026-10.ukr9). Every block with Clair's
+// decide hook gets them, after the phone's events: the built-in one, every
+// snippet the agent rebuilds, and an installed block at each start's refresh.
+var agentEvents = []struct{ event, matcher string }{
+	{record.EventPostToolBatch, ""},
+}
+
+// AgentEvents names the events the agent adds to a hooks block whatever the
+// phone's snippet lists; a daemon reports the ones it knows in ctl.Status so
+// that `clair pair` never writes one an older daemon would not gate.
+func AgentEvents() []string {
+	names := make([]string, 0, len(agentEvents))
+	for _, e := range agentEvents {
+		names = append(names, e.event)
+	}
+	return names
+}
+
 // SnippetConfig shapes the built-in hooks block.
 type SnippetConfig struct {
 	// BaseURL is the agent's loopback origin, e.g. http://127.0.0.1:7317.
@@ -78,6 +97,9 @@ type SnippetConfig struct {
 	EventTimeoutSec      int
 	// IncludeSessionStart adds the SessionStart hook.
 	IncludeSessionStart bool
+	// OmitAgentEvents leaves agentEvents out: for `clair pair` beside a daemon
+	// too old to gate them, and for a stand-in of the phone's template.
+	OmitAgentEvents bool
 	// ClairExe is this binary's path. Claude Code (2.1.278) refuses http hooks
 	// for SessionStart, so it is a `command` hook running `<ClairExe>
 	// hook-event`; empty renders an http hook instead.
@@ -98,16 +120,14 @@ func HookEventCommand(exe string) string {
 }
 
 // RenderHooks builds `{"hooks": {...}}` exactly as the phone's HooksSnippet
-// does, with SessionStart as a command hook running this binary.
+// does, with SessionStart as a command hook running this binary, and then
+// the agent's own events.
 func RenderHooks(c SnippetConfig) *ojson.Object {
 	permission := c.PermissionTimeoutSec
 	if permission <= 0 {
 		permission = permissionTimeoutSec
 	}
-	event := c.EventTimeoutSec
-	if event <= 0 {
-		event = eventTimeoutSec
-	}
+	event := c.eventTimeout()
 	hooks := ojson.NewObject()
 	hooks.Set("PermissionRequest", group("", c.httpHook(decidePath(permission), permission, statusPermission)))
 	for _, e := range eventHooks {
@@ -120,9 +140,43 @@ func RenderHooks(c SnippetConfig) *ojson.Object {
 			hooks.Set("SessionStart", group("", c.httpHook(record.PathEvent, event, "")))
 		}
 	}
+	addAgentEvents(hooks, c)
 	out := ojson.NewObject()
 	out.Set("hooks", hooks)
 	return out
+}
+
+// eventTimeout is the timeout of an event hook the agent writes itself.
+func (c SnippetConfig) eventTimeout() int {
+	if c.EventTimeoutSec > 0 {
+		return c.EventTimeoutSec
+	}
+	return eventTimeoutSec
+}
+
+// addAgentEvents gives a hooks block that has Clair's decide hook each of
+// agentEvents it has no Clair group for: appended to the user's own groups
+// for the event, or under a new key at the end. It returns the events added.
+func addAgentEvents(events *ojson.Object, c SnippetConfig) []string {
+	if c.OmitAgentEvents || !hasClairGroup(events, "PermissionRequest") {
+		return nil
+	}
+	var added []string
+	for _, e := range agentEvents {
+		if hasClairGroup(events, e.event) {
+			continue
+		}
+		have, _ := events.Get(e.event)
+		events.Set(e.event, append(slices.Clone(ojson.AsArray(have)), group(e.matcher, c.httpHook(record.PathEvent, c.eventTimeout(), ""))...))
+		added = append(added, e.event)
+	}
+	return added
+}
+
+// hasClairGroup reports whether a hooks block has a Clair group for event.
+func hasClairGroup(events *ojson.Object, event string) bool {
+	groups, _ := events.Get(event)
+	return slices.ContainsFunc(ojson.AsArray(groups), isClair)
 }
 
 // httpHook is the one shape of the agent's http hooks, whoever asked for
@@ -215,6 +269,11 @@ func knownEvent(event string) bool {
 			return true
 		}
 	}
+	for _, e := range agentEvents {
+		if e.event == event {
+			return true
+		}
+	}
 	return false
 }
 
@@ -231,6 +290,8 @@ func knownEvent(event string) bool {
 // `http://127.0.0.1:<port>` for the agent's port; either way the hook is
 // written with the agent's own origin. An event the template does not know is
 // left out and named in dropped, and a snippet with no event left is refused.
+// The agent's own events are added when the snippet has no group for them
+// (ADR 2026-10.ukr9): the phone's template does not list them.
 //
 // Of a phone's hook only the endpoint, a timeout and a statusMessage are
 // kept, and of a group only its matcher; the headers are the agent's own
@@ -283,6 +344,7 @@ func ValidateSnippet(snippet []byte, c SnippetConfig) (hooks *ojson.Object, drop
 	if rebuilt.Len() == 0 {
 		return nil, nil, fmt.Errorf("%w: no event this agent hooks", ErrSnippetRejected)
 	}
+	addAgentEvents(rebuilt, c)
 	res := ojson.NewObject()
 	res.Set("hooks", rebuilt)
 	return res, dropped, nil
@@ -370,15 +432,17 @@ func (c SnippetConfig) isHookEventCommand(cmd string) bool {
 // where it stands, as a phone snippet's would be rebuilt (ADR 2026-10.sm5c):
 // a hook keeps its endpoint, timeout and statusMessage and a group its
 // matcher, and the rest — headers, allowedEnvVars, the bearer, this binary's
-// path — is the template's. Nothing is added, removed or moved: the user's
-// groups stay where they are, and so do Clair's under an event the template
-// does not hook. It returns how many Clair groups it rebuilt; a group the
-// rebuild refuses stops the whole refresh.
-func refresh(settings *ojson.Object, c SnippetConfig) (int, error) {
+// path — is the template's. Nothing is removed or moved: the user's groups
+// stay where they are, and so do Clair's under an event the template does not
+// hook. Nothing is added but the agent's own events, to a block with Clair's
+// decide hook (ADR 2026-10.ukr9). It returns how many Clair groups it rebuilt
+// or added, and which events it added; a group the rebuild refuses stops the
+// whole refresh.
+func refresh(settings *ojson.Object, c SnippetConfig) (int, []string, error) {
 	hooksVal, _ := settings.Get("hooks")
 	events := ojson.AsObject(hooksVal)
 	if events == nil {
-		return 0, nil
+		return 0, nil, nil
 	}
 	c.anyClairExe = true
 	rebuilt := 0
@@ -395,7 +459,7 @@ func refresh(settings *ojson.Object, c SnippetConfig) (int, error) {
 			}
 			grp, err := c.rebuildGroup(event, g)
 			if err != nil {
-				return 0, fmt.Errorf("claudecfg: the Clair hooks in settings.json cannot be rebuilt: %w", err)
+				return 0, nil, fmt.Errorf("claudecfg: the Clair hooks in settings.json cannot be rebuilt: %w", err)
 			}
 			groups[i] = grp
 			ours = true
@@ -405,7 +469,8 @@ func refresh(settings *ojson.Object, c SnippetConfig) (int, error) {
 			events.Set(event, groups)
 		}
 	}
-	return rebuilt, nil
+	added := addAgentEvents(events, c)
+	return rebuilt + len(added), added, nil
 }
 
 // maxSnippetBytes bounds a phone snippet before it is parsed: the phone's

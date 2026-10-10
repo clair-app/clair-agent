@@ -20,6 +20,20 @@ This file is a [Declarative Changelog](https://whatsnew.fyi/spec). It starts at 
 
 ## Unreleased
 
+### Changed
+
+- The agent now also installs a `PostToolBatch` hook in Claude Code's `settings.json`, next to its
+  permission hook. It sends a batch to your phone only while a prompt is waiting there, so it adds no
+  traffic otherwise. This is the one Clair hook the agent adds back when it starts: if you remove it by
+  hand while the permission hook is installed, it returns. `clair pair` leaves it out while an older
+  agent is still running, and the newer agent adds it when it starts.
+
+### Fixed
+
+- A plan or permission you answer in the terminal with feedback no longer stays waiting on your phone
+  and watch. Claude Code keeps the hook open in that case, so the prompt used to wait until the turn
+  ended, and the agent held it for up to a day. Needs the Clair app release that reads `PostToolBatch`.
+
 ## [0.4.0](https://github.com/clair-app/clair-agent/releases/tag/v0.4.0) — 2026-10-05T22:14:45Z
 
 > Permission prompts from background agents now show in your terminal while you're at it, and new

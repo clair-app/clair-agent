@@ -70,6 +70,10 @@ type Status struct {
 	// 2026-10.sm5c); nil from a daemon older than it, or one that started
 	// unpaired.
 	Hooks *HooksStatus `json:"hooks,omitempty"`
+	// AgentEvents are the hooks the daemon adds to a block itself and
+	// forwards only while a decide is held; empty from a daemon older than
+	// them, beside which `clair pair` writes none (ADR 2026-10.ukr9).
+	AgentEvents []string `json:"agentEvents,omitempty"`
 }
 
 // HooksStatus is the outcome of the daemon's refresh, at start, of the Clair

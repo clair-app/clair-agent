@@ -10,13 +10,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"claircode.app/clair-agent/internal/envelope"
 	"claircode.app/clair-agent/internal/ojson"
+	"claircode.app/clair-agent/internal/record"
 )
 
 const (
@@ -83,6 +86,13 @@ func TestRenderHooksVariants(t *testing.T) {
 // snippetConfig is the host a phone snippet is validated for.
 var snippetConfig = SnippetConfig{BaseURL: baseURL, Token: "t0k3n", Host: "walter-laptop", ClairExe: exePath}
 
+// withAgentEvents is a compact block with the group the agent adds itself to
+// one that has its decide hook (ADR 2026-10.ukr9), for snippetConfig.
+func withAgentEvents(block string) string {
+	const group = `"PostToolBatch":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop"},"timeout":2}]}]`
+	return strings.TrimSuffix(block, "}}") + "," + group + "}}"
+}
+
 func TestSubstituteAndValidate(t *testing.T) {
 	t.Parallel()
 
@@ -96,9 +106,9 @@ func TestSubstituteAndValidate(t *testing.T) {
 	if err != nil || dropped != nil {
 		t.Fatalf("ValidateSnippet: %v, dropped %q", err, dropped)
 	}
-	rebuilt := `{"hooks":{"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=600","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop","X-Clair-Entrypoint":"$CLAUDE_CODE_ENTRYPOINT"},"allowedEnvVars":["CLAUDE_CODE_ENTRYPOINT"],"timeout":600}]}],"SessionStart":[{"hooks":[{"type":"command","command":"/opt/clair/clair hook-event /clair/v1/hook/event"}]}]}}`
+	rebuilt := withAgentEvents(`{"hooks":{"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=600","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop","X-Clair-Entrypoint":"$CLAUDE_CODE_ENTRYPOINT"},"allowedEnvVars":["CLAUDE_CODE_ENTRYPOINT"],"timeout":600}]}],"SessionStart":[{"hooks":[{"type":"command","command":"/opt/clair/clair hook-event /clair/v1/hook/event"}]}]}}`)
 	if got := compact(t, hooks); got != rebuilt {
-		t.Errorf("ValidateSnippet =\n%s\nwant the snippet with the agent's entrypoint header\n%s", got, rebuilt)
+		t.Errorf("ValidateSnippet =\n%s\nwant the snippet with the agent's entrypoint header and its own events\n%s", got, rebuilt)
 	}
 }
 
@@ -297,12 +307,12 @@ func TestValidateSnippetRebuildsEachHook(t *testing.T) {
 		{
 			name:    "unknown hook and group members dropped, matcher and status kept",
 			snippet: `{"hooks":{"PermissionRequest":[{"matcher":"Bash","extra":1,"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=0600","timeout":600,"statusMessage":"on the watch","async":true,"once":true}]}]}}`,
-			want:    `{"hooks":{"PermissionRequest":[{"matcher":"Bash","hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=600","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop","X-Clair-Entrypoint":"$CLAUDE_CODE_ENTRYPOINT"},"allowedEnvVars":["CLAUDE_CODE_ENTRYPOINT"],"timeout":600,"statusMessage":"on the watch"}]}]}}`,
+			want:    withAgentEvents(`{"hooks":{"PermissionRequest":[{"matcher":"Bash","hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=600","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop","X-Clair-Entrypoint":"$CLAUDE_CODE_ENTRYPOINT"},"allowedEnvVars":["CLAUDE_CODE_ENTRYPOINT"],"timeout":600,"statusMessage":"on the watch"}]}]}}`),
 		},
 		{
 			name:    "the decide hook's environment is the agent's, whatever the phone lists",
 			snippet: `{"hooks":{"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide","headers":{"Authorization":"Bearer t0k3n","X-Clair-Entrypoint":"$AWS_SECRET_ACCESS_KEY"},"allowedEnvVars":["AWS_SECRET_ACCESS_KEY","CLAUDE_CODE_ENTRYPOINT"]}]}]}}`,
-			want:    `{"hooks":{"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop","X-Clair-Entrypoint":"$CLAUDE_CODE_ENTRYPOINT"},"allowedEnvVars":["CLAUDE_CODE_ENTRYPOINT"]}]}]}}`,
+			want:    withAgentEvents(`{"hooks":{"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop","X-Clair-Entrypoint":"$CLAUDE_CODE_ENTRYPOINT"},"allowedEnvVars":["CLAUDE_CODE_ENTRYPOINT"]}]}]}}`),
 		},
 		{
 			name:    "the own command hook loses anything beside its command",
@@ -943,7 +953,8 @@ func refresher(t *testing.T, before string) SnippetInstaller {
 
 // A block written before the template changed takes the template's headers
 // and options where it stands, keeping what the phone chose and the user's
-// own hooks, order and statusLine; a second refresh finds nothing to do.
+// own hooks, order and statusLine, and gains the agent's own events at the
+// end; a second refresh finds nothing to do.
 func TestRefreshHooksBringsAnOlderBlockToTheTemplate(t *testing.T) {
 	t.Parallel()
 
@@ -960,8 +971,8 @@ func TestRefreshHooksBringsAnOlderBlockToTheTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RefreshHooks: %v", err)
 	}
-	if report.Groups != 4 || report.Unchanged || report.Backup == "" || report.StatusLine != "" {
-		t.Errorf("report = %+v, want 4 groups rewritten with a backup and the statusLine untouched", report)
+	if report.Groups != 5 || report.Unchanged || report.Backup == "" || report.StatusLine != "" || !slices.Equal(report.Added, AgentEvents()) {
+		t.Errorf("report = %+v, want 4 groups rewritten and %v added, with a backup and the statusLine untouched", report, AgentEvents())
 	}
 	if got, _ := os.ReadFile(si.SettingsPath); !bytes.Equal(got, want) {
 		t.Errorf("settings.json =\n%s\nwant\n%s", got, want)
@@ -974,8 +985,8 @@ func TestRefreshHooksBringsAnOlderBlockToTheTemplate(t *testing.T) {
 	}
 
 	again, err := si.RefreshHooks()
-	if err != nil || !again.Unchanged || again.Backup != "" || again.Groups != 4 {
-		t.Errorf("second RefreshHooks = %+v, %v; want 4 groups unchanged", again, err)
+	if err != nil || !again.Unchanged || again.Backup != "" || again.Groups != 5 || len(again.Added) != 0 {
+		t.Errorf("second RefreshHooks = %+v, %v; want 5 groups unchanged, none added", again, err)
 	}
 	if got := backups(t, si.Installer); len(got) != 1 {
 		t.Errorf("backups = %v, want only the first refresh's", got)
@@ -998,8 +1009,8 @@ func TestRefreshHooksTakesThisBinaryUnderAnyName(t *testing.T) {
 		t.Fatal(err)
 	}
 	report, err := si.RefreshHooks()
-	if err != nil || report.Groups != 1 || report.Unchanged {
-		t.Fatalf("RefreshHooks = %+v, %v; want the one group rewritten", report, err)
+	if err != nil || report.Groups != 1 || report.Unchanged || len(report.Added) != 0 {
+		t.Fatalf("RefreshHooks = %+v, %v; want the one group rewritten and nothing added without the decide hook", report, err)
 	}
 	hooks := ojson.AsObject(mustGet(t, readSettings(t, si.Installer), "hooks"))
 	want := `[{"hooks":[{"type":"command","command":` + strconv.Quote(HookEventCommand(si.ClairExe)) + `}]}]`
@@ -1016,6 +1027,7 @@ func TestRefreshHooksLeavesAHostWithoutClairHooksAlone(t *testing.T) {
 	for _, tt := range []struct{ name, settings string }{
 		{name: "no settings.json"},
 		{name: "only the user's hooks", settings: `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}`},
+		{name: "only the user's own PostToolBatch", settings: `{"hooks":{"PostToolBatch":[{"hooks":[{"type":"command","command":"log-batch.sh"}]}]}}`},
 		{name: "no hooks at all", settings: `{"model":"opus"}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1070,6 +1082,99 @@ func TestRefreshHooksRefusesWhatItCannotRebuild(t *testing.T) {
 				t.Errorf("backups = %v, want none", got)
 			}
 		})
+	}
+}
+
+// The phone's template does not list the agent's own events, so a snippet
+// gets them after its own events whenever it has the decide hook; one that
+// lists an event keeps its own shape of it (ADR 2026-10.ukr9).
+func TestValidateSnippetAddsTheAgentsEvents(t *testing.T) {
+	t.Parallel()
+
+	const (
+		decide = `"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide"}]}]`
+		stop   = `"Stop":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","timeout":2}]}]`
+		batch5 = `"PostToolBatch":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","timeout":5}]}]`
+	)
+	omit := snippetConfig
+	omit.OmitAgentEvents = true
+	tests := []struct {
+		name, snippet string
+		c             SnippetConfig
+		want          []string // the events, in order
+		batchTimeout  string
+	}{
+		{"added after the phone's events", `{"hooks":{` + decide + `,` + stop + `}}`, snippetConfig, []string{"PermissionRequest", "Stop", "PostToolBatch"}, "2"},
+		{"kept where the snippet put it, with its timeout", `{"hooks":{` + decide + `,` + batch5 + `,` + stop + `}}`, snippetConfig, []string{"PermissionRequest", "PostToolBatch", "Stop"}, "5"},
+		{"none without the decide hook", `{"hooks":{` + stop + `}}`, snippetConfig, []string{"Stop"}, ""},
+		{"none when left out", `{"hooks":{` + decide + `,` + stop + `}}`, omit, []string{"PermissionRequest", "Stop"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out, dropped, err := ValidateSnippet([]byte(tt.snippet), tt.c)
+			if err != nil || dropped != nil {
+				t.Fatalf("ValidateSnippet: %v, dropped %q", err, dropped)
+			}
+			hooks := ojson.AsObject(mustGet(t, out, "hooks"))
+			if got := hooks.Keys(); !slices.Equal(got, tt.want) {
+				t.Fatalf("events = %q, want %q", got, tt.want)
+			}
+			if tt.batchTimeout == "" {
+				return
+			}
+			want := `[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop"},"timeout":` + tt.batchTimeout + `}]}]`
+			if got := compact(t, mustGet(t, hooks, "PostToolBatch")); got != want {
+				t.Errorf("PostToolBatch = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestRenderHooksCanLeaveTheAgentsEventsOut(t *testing.T) {
+	t.Parallel()
+
+	hooks := ojson.AsObject(mustGet(t, RenderHooks(SnippetConfig{BaseURL: baseURL, Token: "t", OmitAgentEvents: true}), "hooks"))
+	for _, e := range AgentEvents() {
+		if _, ok := hooks.Get(e); ok {
+			t.Errorf("%s rendered although left out", e)
+		}
+	}
+}
+
+// A user's own hooks for an agent event stay first; Clair's group follows
+// them, as an install appends it.
+func TestRefreshHooksAddsTheAgentsEventsAfterTheUsers(t *testing.T) {
+	t.Parallel()
+
+	const users = `{"hooks":[{"type":"command","command":"log-batch.sh"}]}`
+	si := refresher(t, `{"hooks":{"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=86400"}]}],"PostToolBatch":[`+users+`]}}`)
+	report, err := si.RefreshHooks()
+	if err != nil || report.Groups != 2 || !slices.Equal(report.Added, AgentEvents()) {
+		t.Fatalf("RefreshHooks = %+v, %v; want the decide group rebuilt and PostToolBatch added", report, err)
+	}
+	hooks := ojson.AsObject(mustGet(t, readSettings(t, si.Installer), "hooks"))
+	if got := hooks.Keys(); !slices.Equal(got, []string{"PermissionRequest", "PostToolBatch"}) {
+		t.Errorf("events = %q, want the user's order", got)
+	}
+	want := `[` + users + `,{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop"},"timeout":2}]}]`
+	if got := compact(t, mustGet(t, hooks, "PostToolBatch")); got != want {
+		t.Errorf("PostToolBatch = %s, want %s", got, want)
+	}
+}
+
+// What the agent adds itself it must also gate: a PostToolBatch that went to
+// the relay whatever the agent held would double the tool churn's bytes.
+func TestEveryAgentEventIsGated(t *testing.T) {
+	t.Parallel()
+
+	for _, e := range AgentEvents() {
+		if record.Forwarded(e, false) || !record.Forwarded(e, true) {
+			t.Errorf("%s: Forwarded = %v without a decide, %v with one; want false, true", e, record.Forwarded(e, false), record.Forwarded(e, true))
+		}
+		if w := record.Wake(record.PathEvent, e, true); w != envelope.WakeSoon {
+			t.Errorf("%s: Wake while a decide is held = %v, want soon", e, w)
+		}
 	}
 }
 

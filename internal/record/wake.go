@@ -36,14 +36,19 @@ const (
 	eventPostToolUseFailure = "PostToolUseFailure"
 )
 
+// EventPostToolBatch is the hook Claude Code fires after every tool batch
+// whose turn goes on. It is the only one that says a prompt was refused at the
+// terminal with feedback, and the agent hooks it itself (ADR 2026-10.ukr9).
+const EventPostToolBatch = "PostToolBatch"
+
 // Wake is the hint for a request record (RELAY.md §7.5, ADR 029's tiers one
 // hop earlier). The path decides first: a decide is `now`, and so is a
 // presence change — it is only sent while a decide is held, and it is the
 // moment a prompt delivered quietly must start to buzz (§4.3); the
 // statusline and the installer's ping are `soon`. Then the event name: turn
-// boundaries are `soon`; tool churn is `no`, except that the PostToolUse
-// which closes an action answered in the terminal is `soon` while a decide
-// is held.
+// boundaries are `soon`; tool churn is `no`, except that the PostToolUse or
+// PostToolBatch which closes an action answered in the terminal is `soon`
+// while a decide is held.
 func Wake(path, hookEventName string, decideHeld bool) envelope.Wake {
 	switch path {
 	case PathDecide, PathPresence:
@@ -54,7 +59,7 @@ func Wake(path, hookEventName string, decideHeld bool) envelope.Wake {
 	switch hookEventName {
 	case eventSessionStart, eventSessionEnd, eventUserPromptSubmit, eventStop, eventNotification, eventPreCompact:
 		return envelope.WakeSoon
-	case eventPostToolUse, eventPostToolUseFailure:
+	case eventPostToolUse, eventPostToolUseFailure, EventPostToolBatch:
 		if decideHeld {
 			return envelope.WakeSoon
 		}
@@ -62,6 +67,15 @@ func Wake(path, hookEventName string, decideHeld bool) envelope.Wake {
 	default:
 		return envelope.WakeNo
 	}
+}
+
+// Forwarded reports whether a fire-and-forget hook goes to the phone at all.
+// A PostToolBatch does only while a decide is held: it repeats every call's
+// tool_response, the relay limits uploads by bytes, and the phone needs it
+// only to close a prompt it still has open (ADR 2026-10.ukr9). The hook is
+// answered 204 either way.
+func Forwarded(hookEventName string, decideHeld bool) bool {
+	return hookEventName != EventPostToolBatch || decideHeld
 }
 
 // TTL is the envelope's ttlSec for a hint; decideTimeout is the held request's

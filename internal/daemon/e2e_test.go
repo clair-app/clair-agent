@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -720,6 +721,11 @@ func TestStartRefreshesTheHooksOfAPairedHost(t *testing.T) {
 	want := ctl.HooksStatus{Outcome: ctl.HooksRewritten, Groups: 9, Backup: "settings.json.bak-1"}
 	if st.Hooks == nil || *st.Hooks != want {
 		t.Errorf("status hooks = %+v, want %+v", st.Hooks, want)
+	}
+	// What `clair pair` asks before it writes the agent's own events (ADR
+	// 2026-10.ukr9).
+	if !slices.Equal(st.AgentEvents, claudecfg.AgentEvents()) {
+		t.Errorf("status agentEvents = %q, want %q", st.AgentEvents, claudecfg.AgentEvents())
 	}
 	if got := w.inst.refreshCount(); got != 1 {
 		t.Errorf("refreshes at start = %d, want 1", got)

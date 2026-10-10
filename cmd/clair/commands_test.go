@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,6 +188,39 @@ func TestPrintStatus(t *testing.T) {
 	}
 }
 
+// statusFunc is a daemon's status call.
+type statusFunc func(context.Context) (ctl.Status, error)
+
+func (f statusFunc) Status(ctx context.Context) (ctl.Status, error) { return f(ctx) }
+
+// `clair pair` writes the agent's own events only when the daemon that will
+// receive them gates them, or when none runs (ADR 2026-10.ukr9).
+func TestAgentEventsMissing(t *testing.T) {
+	t.Parallel()
+
+	all := claudecfg.AgentEvents()
+	tests := []struct {
+		name string
+		st   ctl.Status
+		err  error
+		want []string
+	}{
+		{name: "no daemon running", err: ctl.ErrUnreachable},
+		{name: "a daemon that gates them", st: ctl.Status{AgentEvents: all}},
+		{name: "a daemon older than them", st: ctl.Status{Version: "v0.4.0"}, want: all},
+		{name: "a daemon that cannot say", err: errors.New("ctl: 401"), want: all},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := agentEventsMissing(t.Context(), statusFunc(func(context.Context) (ctl.Status, error) { return tt.st, tt.err }))
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("agentEventsMissing = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPrintHooksStatus(t *testing.T) {
 	t.Parallel()
 
@@ -326,6 +360,11 @@ func TestPairInstallsThePhonesHooks(t *testing.T) {
 			}
 			if strings.Contains(stderr.String(), "refused") {
 				t.Errorf("the phone's snippet was refused:\n%s", stderr.String())
+			}
+			// With no daemon running, the next to start is this binary, which
+			// gates the agent's own events (ADR 2026-10.ukr9).
+			if !bytes.Contains(data, []byte(`"PostToolBatch"`)) || strings.Contains(stderr.String(), "left out") {
+				t.Errorf("settings.json lacks the agent's PostToolBatch hook:\n%s\nstderr:\n%s", data, stderr.String())
 			}
 		})
 	}

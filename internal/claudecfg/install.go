@@ -418,6 +418,9 @@ type SnippetInstaller struct {
 	Port    int
 	Token   string
 	Host    string
+	// OmitAgentEvents writes no agent-owned event: `clair pair` sets it beside
+	// a running daemon too old to gate them (ADR 2026-10.ukr9).
+	OmitAgentEvents bool
 }
 
 // SnippetReport says what installing a phone snippet did.
@@ -464,7 +467,7 @@ func eventList(names []string) string {
 }
 
 func (s SnippetInstaller) config() SnippetConfig {
-	return SnippetConfig{BaseURL: s.BaseURL, Token: s.Token, Host: s.Host, ClairExe: s.ClairExe}
+	return SnippetConfig{BaseURL: s.BaseURL, Token: s.Token, Host: s.Host, ClairExe: s.ClairExe, OmitAgentEvents: s.OmitAgentEvents}
 }
 
 // InstallSnippet substitutes, validates and installs a phone snippet. A
@@ -508,23 +511,29 @@ type RefreshReport struct {
 	Report
 
 	// Groups is how many Clair hook groups settings.json holds under events
-	// the template hooks; with none, nothing was written.
+	// the template hooks, the added ones included; with none, nothing was
+	// written.
 	Groups int
+	// Added names the agent's own events the refresh gave a group (ADR
+	// 2026-10.ukr9).
+	Added []string
 }
 
 // RefreshHooks rebuilds the Clair hooks already in settings.json from this
-// binary's template where they stand, adding none and leaving the statusLine
-// and everything else alone, so a release that changes the template reaches
-// a host without a re-pair or a new snippet (ADR 2026-10.sm5c). A block the
-// rebuild refuses is an error and stays as it was.
+// binary's template where they stand, leaving the statusLine and everything
+// else alone, so a release that changes the template reaches a host without a
+// re-pair or a new snippet (ADR 2026-10.sm5c). It adds none but the agent's
+// own events, to a block with Clair's decide hook (ADR 2026-10.ukr9). A block
+// the rebuild refuses is an error and stays as it was.
 func (s SnippetInstaller) RefreshHooks() (RefreshReport, error) {
 	groups := 0
+	var added []string
 	report, err := s.edit(func(settings *ojson.Object) (string, error) {
 		var err error
-		groups, err = refresh(settings, s.config())
+		groups, added, err = refresh(settings, s.config())
 		return "", err
 	})
-	return RefreshReport{Report: report, Groups: groups}, err
+	return RefreshReport{Report: report, Groups: groups, Added: added}, err
 }
 
 // Uninstall removes the hooks and restores the statusLine.

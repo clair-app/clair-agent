@@ -10,7 +10,8 @@ topics: [hooks, security, pairing]
 
 Status: Accepted (2026-09-23) · amends ADR 2026-09.3gre and 2026-09.ut2g · cross-repo fix D2 (2026-09-23) ·
 amended by ADR 2026-10.sm5c (an edit that leaves a missing file empty writes nothing, and the daemon's start
-rebuilds the installed hooks, which is the first write of the hooks alone)
+rebuilds the installed hooks, which is the first write of the hooks alone) · amended by ADR 2026-10.ukr9 (a snippet
+with the decide hook gets the agent's own events whether or not it lists them)
 
 **What was observed.** `claudecfg.Substitute` pasted shell-quoted values into the snippet's
 raw JSON text. On Windows `quoteForShell` wraps a path with a space in double quotes, so

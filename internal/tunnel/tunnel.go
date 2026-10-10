@@ -275,7 +275,8 @@ func (t *Tunnel) SetPairs(pairs []PairConfig) {
 }
 
 // Enqueue satisfies hookserver.Sink for fire-and-forget hooks: the record is
-// sealed and queued for every pair. With no pair it is dropped.
+// sealed and queued for every pair. With no pair it is dropped, and so is a
+// PostToolBatch for a pair that holds no decide (ADR 2026-10.ukr9).
 func (t *Tunnel) Enqueue(req record.Record, hook record.Hook) error {
 	pairs := t.activePairs()
 	if len(pairs) == 0 {
@@ -283,7 +284,11 @@ func (t *Tunnel) Enqueue(req record.Record, hook record.Hook) error {
 	}
 	req = stamp(req, t.sample())
 	for _, p := range pairs {
-		wake := record.Wake(req.Path, hook.Event, p.holding())
+		held := p.holding()
+		if !record.Forwarded(hook.Event, held) {
+			continue
+		}
+		wake := record.Wake(req.Path, hook.Event, held)
 		if err := p.enqueue(req, wake, record.TTL(wake, 0)); err != nil && !errors.Is(err, errTooLarge) && !errors.Is(err, errDormant) {
 			t.log.Warn("record not queued", "pair", p.cfg.ID, "req_id", req.ReqID, "error", err.Error())
 		}

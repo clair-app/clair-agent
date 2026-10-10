@@ -504,6 +504,46 @@ func TestPostToolUseIsSoonWhileADecideIsHeld(t *testing.T) {
 	})
 }
 
+// A PostToolBatch closes a prompt the terminal refused with feedback, which
+// no PostToolUse follows; it goes out only while a decide is held, since it
+// repeats every call's response (ADR 2026-10.ukr9).
+func TestPostToolBatchIsQueuedOnlyWhileADecideIsHeld(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, nil)
+		defer h.stop(t)
+		_ = h.tun.Enqueue(hook("PostToolBatch"), event("PostToolBatch"))
+		synctest.Wait()
+		var wg sync.WaitGroup
+		holdCtx, cancelHold := context.WithCancel(t.Context())
+		wg.Go(func() {
+			_, _, _ = h.tun.Hold(holdCtx, decide("01ARYZ6S41TSV4RRFFQ69G5FAW"), event("PermissionRequest"), time.Hour)
+		})
+		synctest.Wait()
+		_ = h.tun.Enqueue(hook("PostToolBatch"), event("PostToolBatch"))
+		synctest.Wait()
+		cancelHold()
+		wg.Wait()
+		synctest.Wait()
+		_ = h.tun.Enqueue(hook("PostToolBatch"), event("PostToolBatch"))
+		synctest.Wait()
+		envs := h.relay.uploaded()
+		// reset, decide, PostToolBatch (held → soon), cancel; neither batch
+		// without a hold.
+		if len(envs) != 4 {
+			t.Fatalf("uploaded %d envelopes, want 4", len(envs))
+		}
+		if envs[1].Wake != envelope.WakeNow {
+			t.Errorf("decide envelope: wake %s, want now", envs[1].Wake)
+		}
+		if rec := h.phone.open(envs[2]); envs[2].Wake != envelope.WakeSoon || rec.Path != record.PathEvent {
+			t.Errorf("PostToolBatch while held: wake %s, record %+v; want a soon event", envs[2].Wake, rec)
+		}
+		if rec := h.phone.open(envs[3]); rec.Control != record.ControlCancel {
+			t.Errorf("after the client left: %+v, want a cancel for the decide", rec)
+		}
+	})
+}
+
 func TestHoldIsResolvedByTheResponse(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newHarness(t, nil)

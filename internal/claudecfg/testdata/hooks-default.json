@@ -150,6 +150,21 @@
           }
         ]
       }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:7317/clair/v1/hook/event",
+            "headers": {
+              "Authorization": "Bearer t0k3n",
+              "X-Clair-Host": "walter-laptop"
+            },
+            "timeout": 2
+          }
+        ]
+      }
     ]
   }
 }

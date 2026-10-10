@@ -264,6 +264,8 @@ func (d *daemon) Status(context.Context) ctl.Status {
 		Paired:    len(pairs) > 0,
 		Pairs:     pairs,
 		Unpaired:  d.tunnel.Unpaired(),
+
+		AgentEvents: claudecfg.AgentEvents(),
 	}
 	if s := d.opts.Presence.Sample(); s.Known {
 		st.Presence = &ctl.Presence{IdleMs: s.Idle.Milliseconds(), Source: s.Source}
@@ -496,7 +498,7 @@ func (d *daemon) refreshHooks() {
 		d.log.Info("hooks match this agent's template", "groups", report.Groups)
 	default:
 		st.Outcome, st.Backup = ctl.HooksRewritten, report.Backup
-		d.log.Info("hooks rewritten to this agent's template", "groups", report.Groups, "backup", report.Backup)
+		d.log.Info("hooks rewritten to this agent's template", "groups", report.Groups, "added", report.Added, "backup", report.Backup)
 	}
 	d.mu.Lock()
 	d.hooks = st

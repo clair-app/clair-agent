@@ -8,7 +8,7 @@ topics: [hooks, security]
 
 # ADR 2026-09.ut2g — A phone snippet is rebuilt from the agent's own hook template, with each event pinned to its endpoint
 
-Status: Accepted (2026-09-23) · tightens ADR 2026-09.3gre · security review 2026-09-23, findings AG-1 and AG-2 · amended by ADR 2026-09.bckr (only the template's events; the phone's canonical loopback origin accepted, the agent's written) · amended by ADR 2026-10.gw8w (the decide hook carries one agent-fixed `allowedEnvVars`, `CLAUDE_CODE_ENTRYPOINT`, in a header the agent never forwards)
+Status: Accepted (2026-09-23) · tightens ADR 2026-09.3gre · security review 2026-09-23, findings AG-1 and AG-2 · amended by ADR 2026-09.bckr (only the template's events; the phone's canonical loopback origin accepted, the agent's written) · amended by ADR 2026-10.gw8w (the decide hook carries one agent-fixed `allowedEnvVars`, `CLAUDE_CODE_ENTRYPOINT`, in a header the agent never forwards) · amended by ADR 2026-10.ukr9 (the rebuilt block also gets the agent's own `PostToolBatch` group, which the phone's template does not list)
 
 **What was observed.** ADR 2026-09.3gre's validator checked a phone snippet's hooks for `type`,
 `url` and `command` and then installed the phone's objects as sent. Two holes followed. First,

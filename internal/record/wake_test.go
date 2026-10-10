@@ -32,6 +32,8 @@ func TestWake(t *testing.T) {
 		{path: PathEvent, event: "PostToolUseFailure", held: true, want: envelope.WakeSoon},
 		{path: PathEvent, event: "PostToolUse", held: false, want: envelope.WakeNo},
 		{path: PathEvent, event: "PostToolUseFailure", held: false, want: envelope.WakeNo},
+		{path: PathEvent, event: "PostToolBatch", held: true, want: envelope.WakeSoon},
+		{path: PathEvent, event: "PostToolBatch", held: false, want: envelope.WakeNo},
 		{path: PathEvent, event: "PreToolUse", held: true, want: envelope.WakeNo},
 		{path: PathEvent, event: "PreToolUse", held: false, want: envelope.WakeNo},
 		{path: PathEvent, event: "SubagentStop", want: envelope.WakeNo},
@@ -43,6 +45,28 @@ func TestWake(t *testing.T) {
 	for _, tt := range tests {
 		if got := Wake(tt.path, tt.event, tt.held); got != tt.want {
 			t.Errorf("Wake(%q, %q, held=%v) = %q, want %q", tt.path, tt.event, tt.held, got, tt.want)
+		}
+	}
+}
+
+func TestForwarded(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		event string
+		held  bool
+		want  bool
+	}{
+		{event: "PostToolBatch", held: true, want: true},
+		{event: "PostToolBatch", held: false, want: false},
+		{event: "PostToolUse", held: false, want: true},
+		{event: "PreToolUse", held: false, want: true},
+		{event: "SomethingNew", held: false, want: true},
+		{event: "", held: false, want: true},
+	}
+	for _, tt := range tests {
+		if got := Forwarded(tt.event, tt.held); got != tt.want {
+			t.Errorf("Forwarded(%q, held=%v) = %v, want %v", tt.event, tt.held, got, tt.want)
 		}
 	}
 }

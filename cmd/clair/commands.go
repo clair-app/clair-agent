@@ -10,10 +10,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/term"
 
+	"claircode.app/clair-agent/internal/claudecfg"
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/hookserver"
 	"claircode.app/clair-agent/internal/hostname"
@@ -124,6 +127,10 @@ func cmdPair(ctx context.Context, d deps, args []string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "clair pair: %v\n", err)
 		return exitError
 	}
+	if missing := agentEventsMissing(ctx, controlClient(agent)); len(missing) > 0 {
+		installer.OmitAgentEvents = true
+		fmt.Fprintf(stderr, "note: the running agent is older than this command, so the %s hook is left out; the agent adds it when it next starts on this binary\n", strings.Join(missing, ", "))
+	}
 	v, _, _ := buildVersion()
 	opts := pairing.Options{
 		Dir:      dir,
@@ -151,6 +158,33 @@ func cmdPair(ctx context.Context, d deps, args []string, stdout, stderr io.Write
 		return exitError
 	}
 	return exitOK
+}
+
+// daemonStatus is the one daemon call agentEventsMissing makes; ctl.Client
+// satisfies it.
+type daemonStatus interface {
+	Status(ctx context.Context) (ctl.Status, error)
+}
+
+// agentEventsMissing names the agent's own events this binary would write
+// that the running daemon does not forward only while it holds a decide.
+// `clair pair` leaves them out rather than have an older daemon send every
+// tool batch to the relay (ADR 2026-10.ukr9); the newer daemon's refresh
+// adds them at its start. With no daemon listening, the next one to start is
+// this binary, and nothing is missing; a daemon that cannot say is taken for
+// an older one.
+func agentEventsMissing(ctx context.Context, daemon daemonStatus) []string {
+	st, err := daemon.Status(ctx)
+	if errors.Is(err, ctl.ErrUnreachable) {
+		return nil
+	}
+	var missing []string
+	for _, e := range claudecfg.AgentEvents() {
+		if err != nil || !slices.Contains(st.AgentEvents, e) {
+			missing = append(missing, e)
+		}
+	}
+	return missing
 }
 
 func cmdUnpair(ctx context.Context, d deps, args []string, stdout, stderr io.Writer) int {
