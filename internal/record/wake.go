@@ -41,14 +41,19 @@ const (
 // terminal with feedback, and the agent hooks it itself (ADR 2026-10.ukr9).
 const EventPostToolBatch = "PostToolBatch"
 
+// EventStopFailure is the hook Claude Code fires in place of Stop when a turn
+// ends on an API error — a usage limit among them. The agent hooks it itself,
+// and it is a turn boundary like Stop (ADR 2026-10.6cm3).
+const EventStopFailure = "StopFailure"
+
 // Wake is the hint for a request record (RELAY.md §7.5, ADR 029's tiers one
 // hop earlier). The path decides first: a decide is `now`, and so is a
 // presence change — it is only sent while a decide is held, and it is the
 // moment a prompt delivered quietly must start to buzz (§4.3); the
 // statusline and the installer's ping are `soon`. Then the event name: turn
-// boundaries are `soon`; tool churn is `no`, except that the PostToolUse or
-// PostToolBatch which closes an action answered in the terminal is `soon`
-// while a decide is held.
+// boundaries, a turn ended by an API error included, are `soon`; tool churn
+// is `no`, except that the PostToolUse or PostToolBatch which closes an action
+// answered in the terminal is `soon` while a decide is held.
 func Wake(path, hookEventName string, decideHeld bool) envelope.Wake {
 	switch path {
 	case PathDecide, PathPresence:
@@ -57,7 +62,7 @@ func Wake(path, hookEventName string, decideHeld bool) envelope.Wake {
 		return envelope.WakeSoon
 	}
 	switch hookEventName {
-	case eventSessionStart, eventSessionEnd, eventUserPromptSubmit, eventStop, eventNotification, eventPreCompact:
+	case eventSessionStart, eventSessionEnd, eventUserPromptSubmit, eventStop, EventStopFailure, eventNotification, eventPreCompact:
 		return envelope.WakeSoon
 	case eventPostToolUse, eventPostToolUseFailure, EventPostToolBatch:
 		if decideHeld {

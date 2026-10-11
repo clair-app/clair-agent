@@ -65,21 +65,37 @@ var eventHooks = []struct{ event, matcher string }{
 	{"SessionEnd", ""},
 }
 
-// agentEvents are fire-and-forget events the agent hooks itself, which the
-// phone's template does not list (ADR 2026-10.ukr9). Every block with Clair's
-// decide hook gets them, after the phone's events: the built-in one, every
-// snippet the agent rebuilds, and an installed block at each start's refresh.
-var agentEvents = []struct{ event, matcher string }{
-	{record.EventPostToolBatch, ""},
+// quotaResumeMatcher picks the Notifications Claude Code sends when a task
+// paused at a usage limit continues, or will not continue on its own (ADR
+// 2026-10.6cm3).
+const quotaResumeMatcher = "quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled"
+
+// agentEvent is a group the agent hooks itself. One with a matcher is its own
+// group beside the phone's for the same event, and is told apart by that
+// matcher; one without is any Clair group for its event. Its name is what
+// AgentEvents reports.
+type agentEvent struct {
+	event, matcher, name string
 }
 
-// AgentEvents names the events the agent adds to a hooks block whatever the
+// agentEvents are fire-and-forget events the agent hooks itself, which the
+// phone's template does not list (ADR 2026-10.ukr9, ADR 2026-10.6cm3). Every
+// block with Clair's decide hook gets them, after the phone's events: the
+// built-in one, every snippet the agent rebuilds, and an installed block at
+// each start's refresh.
+var agentEvents = []agentEvent{
+	{event: record.EventPostToolBatch, name: record.EventPostToolBatch},
+	{event: record.EventStopFailure, name: record.EventStopFailure},
+	{event: "Notification", matcher: quotaResumeMatcher, name: "Notification:quota_auto_resume"},
+}
+
+// AgentEvents names the groups the agent adds to a hooks block whatever the
 // phone's snippet lists; a daemon reports the ones it knows in ctl.Status so
-// that `clair pair` never writes one an older daemon would not gate.
+// that `clair pair` never writes one an older daemon would not handle.
 func AgentEvents() []string {
 	names := make([]string, 0, len(agentEvents))
 	for _, e := range agentEvents {
-		names = append(names, e.event)
+		names = append(names, e.name)
 	}
 	return names
 }
@@ -156,19 +172,20 @@ func (c SnippetConfig) eventTimeout() int {
 
 // addAgentEvents gives a hooks block that has Clair's decide hook each of
 // agentEvents it has no Clair group for: appended to the user's own groups
-// for the event, or under a new key at the end. It returns the events added.
+// for the event, and the phone's, or under a new key at the end. It returns
+// the names of the groups added.
 func addAgentEvents(events *ojson.Object, c SnippetConfig) []string {
 	if c.OmitAgentEvents || !hasClairGroup(events, "PermissionRequest") {
 		return nil
 	}
 	var added []string
 	for _, e := range agentEvents {
-		if hasClairGroup(events, e.event) {
+		if hasAgentGroup(events, e) {
 			continue
 		}
 		have, _ := events.Get(e.event)
 		events.Set(e.event, append(slices.Clone(ojson.AsArray(have)), group(e.matcher, c.httpHook(record.PathEvent, c.eventTimeout(), ""))...))
-		added = append(added, e.event)
+		added = append(added, e.name)
 	}
 	return added
 }
@@ -177,6 +194,24 @@ func addAgentEvents(events *ojson.Object, c SnippetConfig) []string {
 func hasClairGroup(events *ojson.Object, event string) bool {
 	groups, _ := events.Get(event)
 	return slices.ContainsFunc(ojson.AsArray(groups), isClair)
+}
+
+// hasAgentGroup reports whether a hooks block has an agent event's group: any
+// Clair group for its event, or for one with a matcher, a Clair group with
+// that matcher. The phone's Notification group matches idle_prompt, and is
+// not the agent's quota group.
+func hasAgentGroup(events *ojson.Object, e agentEvent) bool {
+	if e.matcher == "" {
+		return hasClairGroup(events, e.event)
+	}
+	groups, _ := events.Get(e.event)
+	return slices.ContainsFunc(ojson.AsArray(groups), func(g ojson.Value) bool {
+		if !isClair(g) {
+			return false
+		}
+		m, _ := ojson.AsObject(g).Get("matcher")
+		return ojson.AsString(m) == e.matcher
+	})
 }
 
 // httpHook is the one shape of the agent's http hooks, whoever asked for

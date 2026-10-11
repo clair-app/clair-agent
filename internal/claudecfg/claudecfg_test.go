@@ -86,11 +86,17 @@ func TestRenderHooksVariants(t *testing.T) {
 // snippetConfig is the host a phone snippet is validated for.
 var snippetConfig = SnippetConfig{BaseURL: baseURL, Token: "t0k3n", Host: "walter-laptop", ClairExe: exePath}
 
-// withAgentEvents is a compact block with the group the agent adds itself to
-// one that has its decide hook (ADR 2026-10.ukr9), for snippetConfig.
+// withAgentEvents is a compact block with the groups the agent adds itself to
+// one that has its decide hook and no Notification (ADR 2026-10.ukr9, ADR
+// 2026-10.6cm3), for snippetConfig.
 func withAgentEvents(block string) string {
-	const group = `"PostToolBatch":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop"},"timeout":2}]}]`
-	return strings.TrimSuffix(block, "}}") + "," + group + "}}"
+	const (
+		hook   = `{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop"},"timeout":2}`
+		groups = `"PostToolBatch":[{"hooks":[` + hook + `]}],` +
+			`"StopFailure":[{"hooks":[` + hook + `]}],` +
+			`"Notification":[{"matcher":"` + quotaResumeMatcher + `","hooks":[` + hook + `]}]`
+	)
+	return strings.TrimSuffix(block, "}}") + "," + groups + "}}"
 }
 
 func TestSubstituteAndValidate(t *testing.T) {
@@ -971,7 +977,8 @@ func TestRefreshHooksBringsAnOlderBlockToTheTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RefreshHooks: %v", err)
 	}
-	if report.Groups != 5 || report.Unchanged || report.Backup == "" || report.StatusLine != "" || !slices.Equal(report.Added, AgentEvents()) {
+	groups := 4 + len(AgentEvents())
+	if report.Groups != groups || report.Unchanged || report.Backup == "" || report.StatusLine != "" || !slices.Equal(report.Added, AgentEvents()) {
 		t.Errorf("report = %+v, want 4 groups rewritten and %v added, with a backup and the statusLine untouched", report, AgentEvents())
 	}
 	if got, _ := os.ReadFile(si.SettingsPath); !bytes.Equal(got, want) {
@@ -985,8 +992,8 @@ func TestRefreshHooksBringsAnOlderBlockToTheTemplate(t *testing.T) {
 	}
 
 	again, err := si.RefreshHooks()
-	if err != nil || !again.Unchanged || again.Backup != "" || again.Groups != 5 || len(again.Added) != 0 {
-		t.Errorf("second RefreshHooks = %+v, %v; want 5 groups unchanged, none added", again, err)
+	if err != nil || !again.Unchanged || again.Backup != "" || again.Groups != groups || len(again.Added) != 0 {
+		t.Errorf("second RefreshHooks = %+v, %v; want %d groups unchanged, none added", again, err, groups)
 	}
 	if got := backups(t, si.Installer); len(got) != 1 {
 		t.Errorf("backups = %v, want only the first refresh's", got)
@@ -1104,8 +1111,8 @@ func TestValidateSnippetAddsTheAgentsEvents(t *testing.T) {
 		want          []string // the events, in order
 		batchTimeout  string
 	}{
-		{"added after the phone's events", `{"hooks":{` + decide + `,` + stop + `}}`, snippetConfig, []string{"PermissionRequest", "Stop", "PostToolBatch"}, "2"},
-		{"kept where the snippet put it, with its timeout", `{"hooks":{` + decide + `,` + batch5 + `,` + stop + `}}`, snippetConfig, []string{"PermissionRequest", "PostToolBatch", "Stop"}, "5"},
+		{"added after the phone's events", `{"hooks":{` + decide + `,` + stop + `}}`, snippetConfig, []string{"PermissionRequest", "Stop", "PostToolBatch", "StopFailure", "Notification"}, "2"},
+		{"kept where the snippet put it, with its timeout", `{"hooks":{` + decide + `,` + batch5 + `,` + stop + `}}`, snippetConfig, []string{"PermissionRequest", "PostToolBatch", "Stop", "StopFailure", "Notification"}, "5"},
 		{"none without the decide hook", `{"hooks":{` + stop + `}}`, snippetConfig, []string{"Stop"}, ""},
 		{"none when left out", `{"hooks":{` + decide + `,` + stop + `}}`, omit, []string{"PermissionRequest", "Stop"}, ""},
 	}
@@ -1135,9 +1142,9 @@ func TestRenderHooksCanLeaveTheAgentsEventsOut(t *testing.T) {
 	t.Parallel()
 
 	hooks := ojson.AsObject(mustGet(t, RenderHooks(SnippetConfig{BaseURL: baseURL, Token: "t", OmitAgentEvents: true}), "hooks"))
-	for _, e := range AgentEvents() {
-		if _, ok := hooks.Get(e); ok {
-			t.Errorf("%s rendered although left out", e)
+	for _, e := range agentEvents {
+		if hasAgentGroup(hooks, e) {
+			t.Errorf("%s rendered although left out", e.name)
 		}
 	}
 }
@@ -1150,11 +1157,11 @@ func TestRefreshHooksAddsTheAgentsEventsAfterTheUsers(t *testing.T) {
 	const users = `{"hooks":[{"type":"command","command":"log-batch.sh"}]}`
 	si := refresher(t, `{"hooks":{"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide?timeout=86400"}]}],"PostToolBatch":[`+users+`]}}`)
 	report, err := si.RefreshHooks()
-	if err != nil || report.Groups != 2 || !slices.Equal(report.Added, AgentEvents()) {
-		t.Fatalf("RefreshHooks = %+v, %v; want the decide group rebuilt and PostToolBatch added", report, err)
+	if err != nil || report.Groups != 1+len(AgentEvents()) || !slices.Equal(report.Added, AgentEvents()) {
+		t.Fatalf("RefreshHooks = %+v, %v; want the decide group rebuilt and the agent's events added", report, err)
 	}
 	hooks := ojson.AsObject(mustGet(t, readSettings(t, si.Installer), "hooks"))
-	if got := hooks.Keys(); !slices.Equal(got, []string{"PermissionRequest", "PostToolBatch"}) {
+	if got := hooks.Keys(); !slices.Equal(got, []string{"PermissionRequest", "PostToolBatch", "StopFailure", "Notification"}) {
 		t.Errorf("events = %q, want the user's order", got)
 	}
 	want := `[` + users + `,{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","headers":{"Authorization":"Bearer t0k3n","X-Clair-Host":"walter-laptop"},"timeout":2}]}]`
@@ -1163,18 +1170,75 @@ func TestRefreshHooksAddsTheAgentsEventsAfterTheUsers(t *testing.T) {
 	}
 }
 
-// What the agent adds itself it must also gate: a PostToolBatch that went to
-// the relay whatever the agent held would double the tool churn's bytes.
-func TestEveryAgentEventIsGated(t *testing.T) {
+// What the agent adds itself it must also route on purpose: a PostToolBatch
+// that went to the relay whatever the agent held would double the tool
+// churn's bytes, and a turn that ended on a usage limit must wake the phone
+// like a Stop. An agent event this table does not name fails it.
+func TestEveryAgentEventIsRouted(t *testing.T) {
 	t.Parallel()
 
-	for _, e := range AgentEvents() {
-		if record.Forwarded(e, false) || !record.Forwarded(e, true) {
-			t.Errorf("%s: Forwarded = %v without a decide, %v with one; want false, true", e, record.Forwarded(e, false), record.Forwarded(e, true))
+	gated := map[string]bool{
+		record.EventPostToolBatch:        true,
+		record.EventStopFailure:          false,
+		"Notification:quota_auto_resume": false,
+	}
+	for _, e := range agentEvents {
+		g, ok := gated[e.name]
+		if !ok {
+			t.Errorf("%s: not in the table; decide whether it is gated", e.name)
+			continue
 		}
-		if w := record.Wake(record.PathEvent, e, true); w != envelope.WakeSoon {
-			t.Errorf("%s: Wake while a decide is held = %v, want soon", e, w)
+		if got := record.Forwarded(e.event, false); got == g {
+			t.Errorf("%s: Forwarded without a decide = %v, want %v", e.name, got, !g)
 		}
+		if !record.Forwarded(e.event, true) {
+			t.Errorf("%s: Forwarded while a decide is held = false, want true", e.name)
+		}
+		if w := record.Wake(record.PathEvent, e.event, true); w != envelope.WakeSoon {
+			t.Errorf("%s: Wake while a decide is held = %v, want soon", e.name, w)
+		}
+		if w := record.Wake(record.PathEvent, e.event, false); !g && w != envelope.WakeSoon {
+			t.Errorf("%s: Wake without a decide = %v, want soon", e.name, w)
+		}
+	}
+}
+
+// The agent's quota group sits beside the phone's idle_prompt group under the
+// same event: neither stands in for the other, and a block with both gains
+// nothing (ADR 2026-10.6cm3).
+func TestTheQuotaGroupIsToldApartByItsMatcher(t *testing.T) {
+	t.Parallel()
+
+	const (
+		decide = `"PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/decide"}]}]`
+		hook   = `{"type":"http","url":"http://127.0.0.1:7317/clair/v1/hook/event","timeout":2}`
+		idle   = `{"matcher":"idle_prompt","hooks":[` + hook + `]}`
+		quota  = `{"matcher":"` + quotaResumeMatcher + `","hooks":[` + hook + `]}`
+	)
+	tests := []struct {
+		name, notification string
+		want               []string // the matchers, in order
+	}{
+		{"added after the phone's group", `[` + idle + `]`, []string{"idle_prompt", quotaResumeMatcher}},
+		{"kept where it stands", `[` + quota + `,` + idle + `]`, []string{quotaResumeMatcher, "idle_prompt"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out, _, err := ValidateSnippet([]byte(`{"hooks":{`+decide+`,"Notification":`+tt.notification+`}}`), snippetConfig)
+			if err != nil {
+				t.Fatalf("ValidateSnippet: %v", err)
+			}
+			groups := ojson.AsArray(mustGet(t, ojson.AsObject(mustGet(t, out, "hooks")), "Notification"))
+			var got []string
+			for _, g := range groups {
+				m, _ := ojson.AsObject(g).Get("matcher")
+				got = append(got, ojson.AsString(m))
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("Notification matchers = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

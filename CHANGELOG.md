@@ -20,6 +20,16 @@ This file is a [Declarative Changelog](https://whatsnew.fyi/spec). It starts at 
 
 ## Unreleased
 
+### Added
+
+- The agent now also installs a `StopFailure` hook and a second `Notification` hook in Claude Code's
+  `settings.json`, next to its permission hook. When a turn stops on an error such as your claude.ai usage
+  limit, your phone and watch hear that it ended, so the session no longer shows as working while it waits
+  for the limit to reset. The `Notification` hook tells them when Claude Code continues the task after the
+  reset, or when it is waiting for you to press Enter. Like `PostToolBatch`, the agent adds both back when it
+  starts if you remove them by hand while the permission hook is installed. Needs the Clair app release that
+  reads them.
+
 ### Changed
 
 - The agent now also installs a `PostToolBatch` hook in Claude Code's `settings.json`, next to its
