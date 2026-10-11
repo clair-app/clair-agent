@@ -26,6 +26,7 @@ const pairID = "AAAAAAAAAAAAAAAAAAAAAA"
 type fakeRelay struct {
 	mu          sync.Mutex
 	uploads     [][]envelope.Envelope
+	uploadAt    []time.Time
 	uploadErr   error
 	errOnce     bool
 	inflight    int
@@ -71,6 +72,7 @@ func (f *fakeRelay) Upload(_ context.Context, pair string, envs []envelope.Envel
 		receipt.Accepted = append(receipt.Accepted, relay.Accepted{ID: e.ID, Cursor: relay.Cursor(strconv.Itoa(f.cursor)), TTLSec: e.TTLSec})
 	}
 	f.uploads = append(f.uploads, envs)
+	f.uploadAt = append(f.uploadAt, time.Now())
 	return receipt, nil
 }
 
@@ -267,6 +269,9 @@ func newHarnessWith(t *testing.T, opts func(*Options), mod func(*PairConfig)) *h
 	options := Options{
 		Counters: h.counters,
 		Entropy:  &counting{},
+		// Pacing has tests of its own; the rest look at what is uploaded,
+		// not when.
+		UploadSpacing: -1,
 		Hooks: Hooks{
 			OnRevoked: func(id, reason string) {
 				h.mu.Lock()
@@ -1289,4 +1294,135 @@ func TestBackoff(t *testing.T) {
 	if backoff(0) != backoffInitial || backoff(1) != 2*backoffInitial || backoff(10) != backoffMax {
 		t.Errorf("backoff = %v %v %v", backoff(0), backoff(1), backoff(10))
 	}
+}
+
+// paced is a harness with the production upload pacing.
+func paced(o *Options) { o.UploadSpacing = 0 }
+
+func (f *fakeRelay) uploadTimes() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.uploadAt)
+}
+
+func (f *fakeRelay) uploadCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.uploads)
+}
+
+// Under tool churn every hook used to be an upload of its own, and the relay
+// refused the host key past its request rate (ADR 2026-10.rmej): the first
+// upload after a quiet spell goes at once, one right after another waits out
+// uploadSpacing and takes what was queued meanwhile, and a decide waits for
+// nothing.
+func TestUploadsArePacedAndBatchedButADecideIsNot(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarnessWith(t, paced, nil)
+		defer h.stop(t)
+		time.Sleep(10 * uploadSpacing) // the reset's upload is long past
+		if err := h.tun.Enqueue(hook("PreToolUse"), event("PreToolUse")); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if got := h.relay.uploadCount(); got != 2 {
+			t.Fatalf("%d uploads after a quiet spell's hook, want the reset's and this one at once", got)
+		}
+		for _, ev := range []string{"PostToolUse", "PreToolUse", "PostToolUse"} {
+			if err := h.tun.Enqueue(hook(ev), event(ev)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		synctest.Wait()
+		if got := h.relay.uploadCount(); got != 2 {
+			t.Fatalf("%d uploads right after one, want the next to wait", got)
+		}
+		time.Sleep(uploadSpacing)
+		synctest.Wait()
+		h.relay.mu.Lock()
+		uploads := slices.Clone(h.relay.uploads)
+		h.relay.mu.Unlock()
+		if len(uploads) != 3 || len(uploads[2]) != 3 {
+			t.Fatalf("uploads = %d, want a third carrying the three hooks queued meanwhile", len(uploads))
+		}
+		ctx, abandon := context.WithCancel(t.Context())
+		got := make(chan struct{})
+		go func() {
+			defer close(got)
+			_, _, _ = h.tun.Hold(ctx, decide("01ARYZ6S41TSV4RRFFQ69G5FAV"), event("PermissionRequest"), time.Hour)
+		}()
+		synctest.Wait()
+		if got := h.relay.uploadCount(); got != 4 {
+			t.Fatalf("%d uploads right after a decide, want it sent at once", got)
+		}
+		at := h.relay.uploadTimes()
+		if gap := at[2].Sub(at[1]); gap < uploadSpacing {
+			t.Errorf("back-to-back uploads %v apart, want at least %v", gap, uploadSpacing)
+		}
+		if gap := at[3].Sub(at[2]); gap != 0 {
+			t.Errorf("the decide went %v after the upload before it, want at once", gap)
+		}
+		abandon()
+		<-got
+	})
+}
+
+// The relay's rate is per signing key, and every pair signs with the host
+// key: pairs on one relay client share one pace, and a pair on another
+// client does not wait for theirs.
+func TestPairsOnOneRelayClientShareThePace(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarnessWith(t, paced, nil)
+		defer h.stop(t)
+		other := newFakeRelay()
+		h.tun.SetPairs([]PairConfig{
+			{ID: pairID, Keys: h.phone.keys, Relay: h.relay, PhoneName: "Pixel"},
+			{ID: "BBBBBBBBBBBBBBBBBBBBBB", Keys: h.phone.keys, Relay: h.relay, PhoneName: "Pixel 2"},
+			{ID: "CCCCCCCCCCCCCCCCCCCCCC", Keys: h.phone.keys, Relay: other, PhoneName: "Pixel 3"},
+		})
+		synctest.Wait()
+		if got := h.relay.uploadCount(); got != 1 {
+			t.Fatalf("%d uploads on the shared client right after the first pair's reset, want the second pair's to wait", got)
+		}
+		if got := other.uploadCount(); got != 1 {
+			t.Fatalf("%d uploads on another client, want its pair's reset at once", got)
+		}
+		time.Sleep(uploadSpacing)
+		synctest.Wait()
+		if got := h.relay.uploadCount(); got != 2 {
+			t.Fatalf("%d uploads on the shared client after %v, want both resets", got, uploadSpacing)
+		}
+	})
+}
+
+// Acks spend the same per-key rate: the first after a quiet spell goes at
+// once, and cursors applied right after it coalesce into one ack a pacing
+// interval later.
+func TestAcksArePaced(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, nil)
+		defer h.stop(t)
+		policy := func() *envelope.Envelope {
+			return new(h.phone.seal(record.Record{Kind: record.KindControl, Control: record.ControlPolicy}))
+		}
+		h.relay.events <- relay.Event{Kind: relay.EventEnvelope, Cursor: "6", Envelope: policy()}
+		synctest.Wait()
+		h.relay.events <- relay.Event{Kind: relay.EventEnvelope, Cursor: "7", Envelope: policy()}
+		h.relay.events <- relay.Event{Kind: relay.EventEnvelope, Cursor: "8", Envelope: policy()}
+		synctest.Wait()
+		h.relay.mu.Lock()
+		early := slices.Clone(h.relay.acks)
+		h.relay.mu.Unlock()
+		if !slices.Equal(early, []relay.Cursor{"6"}) {
+			t.Fatalf("acks right away = %v, want [6]", early)
+		}
+		time.Sleep(ackInterval)
+		synctest.Wait()
+		h.relay.mu.Lock()
+		acks := slices.Clone(h.relay.acks)
+		h.relay.mu.Unlock()
+		if !slices.Equal(acks, []relay.Cursor{"6", "8"}) {
+			t.Errorf("acks after %v = %v, want [6 8]", ackInterval, acks)
+		}
+	})
 }

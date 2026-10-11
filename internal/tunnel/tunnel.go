@@ -58,6 +58,11 @@ const (
 	// Acks are coalesced: the highest applied cursor is sent at most every
 	// ackInterval (§7.4, draft).
 	ackInterval = time.Second
+	// Upload requests signed by one key start at least uploadSpacing apart,
+	// half the relay's per-key rate, so acks and stream reopens keep room;
+	// what is queued meanwhile joins the next batch, and a `now` record goes
+	// at once (ADR 2026-10.rmej, draft).
+	uploadSpacing = time.Second
 	// The received high-water mark is persisted every counterFlushEvery
 	// records or counterFlushInterval, and on stop (revision G1, draft).
 	counterFlushEvery    = 64
@@ -164,6 +169,10 @@ type Options struct {
 	// MaxRecords and MaxBytes override the FIFO bounds; 0 keeps the defaults.
 	MaxRecords int
 	MaxBytes   int
+	// UploadSpacing overrides the least time between the starts of two
+	// uploads under one signing key; 0 keeps uploadSpacing, negative paces
+	// nothing.
+	UploadSpacing time.Duration
 	// Presence samples the host's terminal input idle (§4.3): stamped on
 	// every request record, and the release rule for bubbled decides. Nil
 	// stamps nothing and never releases.
@@ -176,11 +185,15 @@ type Tunnel struct {
 	log  *slog.Logger
 	now  func() time.Time
 
-	mu       sync.Mutex
-	ctx      context.Context //nolint:containedctx // Run's context, so SetPairs can start goroutines under it
-	running  bool
-	pairs    map[string]*pair
-	pending  []PairConfig
+	mu      sync.Mutex
+	ctx     context.Context //nolint:containedctx // Run's context, so SetPairs can start goroutines under it
+	running bool
+	pairs   map[string]*pair
+	pending []PairConfig
+	// pacers space the uploads of every pair that signs with one key at one
+	// relay, keyed by the pair's Relay: the daemon builds one client per
+	// relay and host key, and the relay's request rate is per key.
+	pacers   map[Relay]*pacer
 	unpaired string
 	wg       sync.WaitGroup
 
@@ -194,7 +207,7 @@ type Tunnel struct {
 
 // New builds a tunnel; Run starts it.
 func New(opts Options) *Tunnel {
-	t := &Tunnel{opts: opts, log: opts.Logger, now: opts.Now, pairs: make(map[string]*pair), open: make(map[*hold]struct{})}
+	t := &Tunnel{opts: opts, log: opts.Logger, now: opts.Now, pairs: make(map[string]*pair), pacers: make(map[Relay]*pacer), open: make(map[*hold]struct{})}
 	if t.log == nil {
 		t.log = slog.New(slog.DiscardHandler)
 	}
@@ -206,6 +219,9 @@ func New(opts Options) *Tunnel {
 	}
 	if t.opts.MaxBytes <= 0 {
 		t.opts.MaxBytes = queueMaxBytes
+	}
+	if t.opts.UploadSpacing == 0 {
+		t.opts.UploadSpacing = uploadSpacing
 	}
 	return t
 }
@@ -267,6 +283,7 @@ func (t *Tunnel) SetPairs(pairs []PairConfig) {
 			t.startLocked(t.ctx, *cfg)
 		}
 	}
+	t.prunePacersLocked()
 	t.mu.Unlock()
 	for _, p := range stopped {
 		p.abortHolds()
@@ -555,9 +572,15 @@ func (t *Tunnel) activePairs() []*pair {
 // caller holds t.mu.
 func (t *Tunnel) startLocked(parent context.Context, cfg PairConfig) {
 	ctx, cancel := context.WithCancel(parent)
+	pace, ok := t.pacers[cfg.Relay]
+	if !ok {
+		pace = &pacer{spacing: t.opts.UploadSpacing}
+		t.pacers[cfg.Relay] = pace
+	}
 	p := &pair{
 		t:             t,
 		cfg:           cfg,
+		pace:          pace,
 		ctx:           ctx,
 		cancel:        cancel,
 		holds:         make(map[string]*hold),
@@ -592,6 +615,20 @@ func (t *Tunnel) startLocked(parent context.Context, cfg PairConfig) {
 	t.log.Info("pair started", "pair", cfg.ID, "phone", cfg.PhoneName)
 }
 
+// prunePacersLocked forgets the pacers no running pair uploads through, such
+// as a client a re-pair with new keys replaced. The caller holds t.mu.
+func (t *Tunnel) prunePacersLocked() {
+	used := make(map[Relay]bool, len(t.pairs))
+	for _, p := range t.pairs {
+		used[p.cfg.Relay] = true
+	}
+	for r := range t.pacers {
+		if !used[r] {
+			delete(t.pacers, r)
+		}
+	}
+}
+
 // remove takes a pair out of the running set after it revoked itself. The
 // pair's goroutines are winding down on their own; nobody waits here.
 func (t *Tunnel) remove(p *pair, reason string) {
@@ -612,6 +649,32 @@ func (t *Tunnel) remove(p *pair, reason string) {
 // to backoffMax.
 func backoff(attempt int) time.Duration {
 	return min(backoffInitial<<min(max(attempt, 0), 6), backoffMax)
+}
+
+// pacer books the start of each upload request under one signing key, so
+// back-to-back uploads keep uploadSpacing apart (ADR 2026-10.rmej). It counts
+// in real time, not the tunnel's clock: what it paces is requests against a
+// bucket that refills in real time.
+type pacer struct {
+	spacing time.Duration
+	mu      sync.Mutex
+	next    time.Time
+}
+
+// take books a request starting now and returns 0, or returns how long until
+// one may start without booking anything. An urgent request is booked now
+// whatever came before it, and the spacing runs on from it.
+func (pc *pacer) take(urgent bool) time.Duration {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	now := time.Now()
+	if wait := pc.next.Sub(now); wait > 0 && !urgent {
+		return wait
+	}
+	if next := now.Add(pc.spacing); next.After(pc.next) {
+		pc.next = next
+	}
+	return 0
 }
 
 // sleep waits for d or the context.

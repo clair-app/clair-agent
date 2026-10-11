@@ -32,8 +32,11 @@ The cause is in Claude Code 2.1.296 (the clair repository's `docs/NOTES.md` 2026
 - **The template has nothing to install it with.** Neither the agent's template nor the phone's had it.
 
 A batch repeats the `tool_response` of every call in it, and `PostToolUse` already sends each of those. The
-relay's `/envelopes` limit is a byte budget per client address, 16 MiB an hour by default, and the maintainer's workstation has logged
-1,864 `429 rate_limited` since 2026-10-05.
+relay's `/envelopes` limit is a byte budget per client address, 16 MiB an hour by default. The maintainer's workstation has logged
+1,864 `429 rate_limited` since 2026-10-05, but those are not that budget: the relay's log names the per-key
+request rate (a bucket of 60 refilling 1 a second), and every one cleared on its first 1 s retry. They come from
+the uploader posting each small batch as soon as it is queued, not from the bytes (paced since ADR
+2026-10.rmej).
 
 **What changed.**
 
@@ -64,8 +67,8 @@ relay's `/envelopes` limit is a byte budget per client address, 16 MiB an hour b
 - **`phonesim` renders its snippet with `OmitAgentEvents`,** like the phone's template.
 
 The alternative a reader reaches for first is to forward every batch, like `PostToolUse`. The tunnel would stay
-blind to one more event, but the tool churn's bytes would double, on a budget the maintainer's workstation already exceeds, for an event
-the phone ignores unless a prompt is open. The second was to add the event to the phone's template. Then the
+blind to one more event, but the tool churn's uploads would grow, against a per-key request rate the maintainer's workstation already
+exceeds, for an event the phone ignores unless a prompt is open. The second was to add the event to the phone's template. Then the
 snippet hash changes and every pair is resent, an older daemon trims the event and the phone marks it delivered,
 and r12 item 5's rule comes back: the agent ships a release first, and it still doesn't close the gap. The third
 was to have the agent end a stale hold itself, on the session's next hook. That needs `session_id`, and the agent

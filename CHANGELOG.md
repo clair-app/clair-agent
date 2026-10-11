@@ -43,6 +43,10 @@ This file is a [Declarative Changelog](https://whatsnew.fyi/spec). It starts at 
 - A plan or permission you answer in the terminal with feedback no longer stays waiting on your phone
   and watch. Claude Code keeps the hook open in that case, so the prompt used to wait until the turn
   ended, and the agent held it for up to a day. Needs the Clair app release that reads `PostToolBatch`.
+- The agent no longer runs into the relay's request limit while Claude Code is busy with tools. It used to
+  send every hook in a request of its own, and past the relay's limit about every other request was refused
+  and sent again a second later. It now waits at least a second between uploads and sends the hooks that
+  arrived meanwhile together. A permission prompt still goes at once.
 
 ## [0.4.0](https://github.com/clair-app/clair-agent/releases/tag/v0.4.0) — 2026-10-05T22:14:45Z
 

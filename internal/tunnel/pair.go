@@ -31,6 +31,7 @@ type item struct {
 type pair struct {
 	t      *Tunnel
 	cfg    PairConfig
+	pace   *pacer
 	ctx    context.Context //nolint:containedctx // the pair's lifetime; cancel stops its goroutines
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -509,8 +510,27 @@ func goneReason(err error) string {
 	return "the relay reports the pair revoked"
 }
 
-// uploader drains the queue: one upload in flight, batches as the relay
-// allows, backoff on failure, halving the batch on 413.
+// urgentLocked reports whether a `now` record is queued; the caller holds p.mu.
+func (p *pair) urgentLocked() bool {
+	return slices.ContainsFunc(p.queue, func(it item) bool { return it.wake == envelope.WakeNow })
+}
+
+// waitPace waits out the pacer for d, or less when a record is queued — it
+// may be a `now` one, which goes at once — or the context ends.
+func (p *pair) waitPace(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	case <-p.kick:
+	}
+	return nil
+}
+
+// uploader drains the queue: one upload in flight, paced per signing key,
+// batches as the relay allows, backoff on failure, halving the batch on 413.
 func (p *pair) uploader(ctx context.Context) {
 	attempt := 0
 	for {
@@ -522,9 +542,20 @@ func (p *pair) uploader(ctx context.Context) {
 		for {
 			p.mu.Lock()
 			batch := p.peekLocked()
+			urgent := p.urgentLocked()
 			p.mu.Unlock()
 			if len(batch) == 0 {
 				break
+			}
+			// Under tool churn every hook would be an upload of its own, and
+			// the relay refuses a key past its request rate. So an upload
+			// right after another waits, and what is queued meanwhile joins
+			// it; a decide does not wait (ADR 2026-10.rmej).
+			if wait := p.pace.take(urgent); wait > 0 {
+				if p.waitPace(ctx, wait) != nil {
+					return
+				}
+				continue
 			}
 			receipt, err := p.cfg.Relay.Upload(ctx, p.cfg.ID, batch)
 			p.applyReceipt(receipt)
@@ -815,8 +846,9 @@ func (p *pair) ack(c relay.Cursor) {
 	}
 }
 
-// acker sends the pending cursor when one is applied, retries a failed one
-// with backoff, and sends it once more on stop.
+// acker sends the pending cursor when one is applied, at most one ack every
+// ackInterval, retries a failed one with backoff, and sends it once more on
+// stop.
 func (p *pair) acker(ctx context.Context) {
 	ticker := time.NewTicker(ackInterval)
 	defer ticker.Stop()
@@ -826,6 +858,7 @@ func (p *pair) acker(ctx context.Context) {
 		p.flushAck(flushCtx)
 	}
 	attempt := 0
+	var last time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -834,6 +867,19 @@ func (p *pair) acker(ctx context.Context) {
 		case <-p.ackSig:
 		case <-ticker.C:
 		}
+		// An ack spends the same per-key request rate as an upload, so one
+		// right after another waits, and cursors applied meanwhile coalesce
+		// into it (ADR 2026-10.rmej). Real time, like the uploads' pacer.
+		if wait := ackInterval - time.Since(last); wait > 0 {
+			if sleep(ctx, wait) != nil {
+				final()
+				return
+			}
+		}
+		if !p.ackPending() {
+			continue
+		}
+		last = time.Now()
 		if !p.flushAck(ctx) {
 			attempt = 0
 			continue
@@ -848,6 +894,12 @@ func (p *pair) acker(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (p *pair) ackPending() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pendingAck != ""
 }
 
 // flushAck sends the pending cursor and reports whether it failed in a way
