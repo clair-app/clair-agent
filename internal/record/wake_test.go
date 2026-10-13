@@ -20,6 +20,7 @@ func TestWake(t *testing.T) {
 		{path: PathDecide, event: "PermissionRequest", want: envelope.WakeNow},
 		{path: PathDecide, event: "", want: envelope.WakeNow},
 		{path: PathStatusline, event: "", want: envelope.WakeSoon},
+		{path: PathUsage, event: "", want: envelope.WakeSoon},
 		{path: PathPing, event: "", want: envelope.WakeSoon},
 		{path: PathPresence, event: "", held: true, want: envelope.WakeNow},
 		{path: PathEvent, event: "SessionStart", want: envelope.WakeSoon},

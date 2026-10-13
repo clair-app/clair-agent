@@ -30,6 +30,11 @@ const (
 	// decide: the host's terminal-input idle time changed (§4.3). Its body
 	// is `{"idleMs": <int>}`.
 	PathPresence = PathPrefix + "/hook/presence"
+	// PathUsage is a request the agent itself sends when its statusline
+	// reports carry no seven-day window: each model's own weekly window, as
+	// Claude Code's get_usage reads it (ADR 2026-10.mhj3). Its body is
+	// `{"seven_day_models": [{"model", "used_percentage", "resets_at"?}]}`.
+	PathUsage = PathPrefix + "/usage"
 	// TimeoutQuery is the decide endpoint's query parameter, in seconds.
 	TimeoutQuery = "timeout"
 	// HostHeader names the machine a hook came from; it is the one request

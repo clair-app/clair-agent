@@ -65,7 +65,10 @@ ADR 2026-09.kau2; the design constraints come from `RELAY.md` (see `context/desi
   environment, and never forwards it (ADR 2026-10.gw8w); and when the phone *answers* a
   decide, `internal/hookout` reads the held request's `tool_name`, `tool_input` and
   `permission_suggestions` to check the answer against it (ADR 2026-09.w4ww) — never before,
-  never logged, never changing what is tunnelled.
+  never logged, never changing what is tunnelled. A `/statusline` body is not a hook, and of it
+  the loopback server reads only whether `rate_limits.five_hour` and `rate_limits.seven_day`
+  hold a value, to know when to ask Claude Code for each model's week (ADR 2026-10.mhj3); the
+  statusline goes on unchanged, and what the agent learns travels as a request of its own.
 - Presence is sampled in-process (`internal/presence`: pty access times, `GetLastInputInfo`)
   and only when a hook arrives or a decide is held — the tunnel's watcher ticks, but samples
   nothing while nothing is held. Never a `command` hook, never a helper binary.

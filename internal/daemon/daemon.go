@@ -17,6 +17,7 @@ import (
 
 	"claircode.app/clair-agent/internal/claudecfg"
 	"claircode.app/clair-agent/internal/ctl"
+	"claircode.app/clair-agent/internal/envelope"
 	"claircode.app/clair-agent/internal/hookserver"
 	"claircode.app/clair-agent/internal/hostname"
 	"claircode.app/clair-agent/internal/presence"
@@ -25,6 +26,7 @@ import (
 	"claircode.app/clair-agent/internal/state"
 	"claircode.app/clair-agent/internal/tunnel"
 	"claircode.app/clair-agent/internal/update"
+	"claircode.app/clair-agent/internal/usage"
 )
 
 // drainTimeout is how long shutdown lets the tunnel release held decides and
@@ -75,6 +77,9 @@ type Options struct {
 	// update itself, and UpdateOff says why.
 	Updater   *update.Updater
 	UpdateOff string
+	// UsageProbe reads each model's own weekly window when the statusline
+	// has no seven-day one (ADR 2026-10.mhj3); nil asks Claude Code.
+	UsageProbe func(ctx context.Context) ([]usage.Week, error)
 }
 
 // Run serves until ctx ends, then drains the tunnel and closes the listener.
@@ -122,11 +127,18 @@ func Run(ctx context.Context, o Options) error {
 		Entropy:  o.Entropy,
 		Presence: d.opts.Presence,
 	})
+	probe := o.UsageProbe
+	if probe == nil {
+		run := usage.Claude()
+		probe = func(ctx context.Context) ([]usage.Week, error) { return usage.Probe(ctx, run) }
+	}
+	poller := usage.New(usage.Options{Probe: probe, Send: d.sendUsage, Now: d.now, Logger: d.log})
 	srv, err := hookserver.New(hookserver.Options{
 		Token:      o.Agent.Token,
 		AdminToken: o.Agent.AdminToken,
 		Sink:       d.tunnel,
 		Control:    d,
+		Usage:      poller,
 		Logger:     d.log,
 		Now:        d.now,
 		Entropy:    o.Entropy,
@@ -165,6 +177,11 @@ func Run(ctx context.Context, o Options) error {
 		o.Updater.Sweep()
 		wg.Go(func() { o.Updater.Run(updateCtx) })
 	}
+	// The usage poller probes only when a statusline asks for it, and a
+	// probe in flight ends with the daemon.
+	usageCtx, stopUsage := context.WithCancel(ctx)
+	defer stopUsage()
+	wg.Go(func() { poller.Run(usageCtx) })
 	d.log.Info("agent listening", "listen", d.listen, "relay", o.Agent.Relay, "version", o.Version, "pairs", d.pairCount())
 	if o.Ready != nil {
 		o.Ready <- d.listen
@@ -183,6 +200,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	stopTunnel()
 	stopUpdate()
+	stopUsage()
 	<-tunnelDone
 	wg.Wait()
 	return err
@@ -211,6 +229,23 @@ type daemon struct {
 	snippetMu  sync.Mutex
 	next       *pendingSnippet
 	installing bool
+}
+
+// sendUsage queues the usage poller's report for every pair, a request the
+// agent originates as it does presence (RELAY.md r15, ADR 2026-10.mhj3).
+func (d *daemon) sendUsage(body []byte) {
+	id, err := envelope.NewID(d.now(), d.opts.Entropy)
+	if err != nil {
+		d.log.Warn("usage report not queued", "error", err.Error())
+		return
+	}
+	rec := record.Record{Kind: record.KindRequest, ReqID: id, Path: record.PathUsage, Body: body}
+	if hostname.Valid(d.hostname) {
+		rec.Headers = map[string]string{record.HostHeader: d.hostname}
+	}
+	if err := d.tunnel.Enqueue(rec, record.Hook{}); err != nil && !errors.Is(err, tunnel.ErrNoPair) {
+		d.log.Warn("usage report not queued", "req_id", rec.ReqID, "bytes", len(body), "error", err.Error())
+	}
 }
 
 // pendingSnippet is a phone's hooks block waiting to be installed.

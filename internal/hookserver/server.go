@@ -66,6 +66,14 @@ type Controller interface {
 	Update(ctx context.Context, req ctl.UpdateRequest) ctl.UpdateResult
 }
 
+// UsageNoter hears of a statusline whose rate limits have a five-hour window
+// and no seven-day one, so the account's week is a model's own and the agent
+// reads it itself (ADR 2026-10.mhj3).
+type UsageNoter interface {
+	// WeekMissing must not block.
+	WeekMissing()
+}
+
 // Options configure a Server.
 type Options struct {
 	// Token is the hook bearer (agent.json's token). Empty refuses every hook.
@@ -76,7 +84,9 @@ type Options struct {
 	MaxBodyBytes int64
 	Sink         Sink
 	Control      Controller
-	Logger       *slog.Logger
+	// Usage, when set, hears of a statusline without a seven-day window.
+	Usage  UsageNoter
+	Logger *slog.Logger
 	// Now and Entropy mint request ids.
 	Now     func() time.Time
 	Entropy io.Reader
@@ -89,6 +99,7 @@ type Server struct {
 	maxBody int64
 	sink    Sink
 	control Controller
+	usage   UsageNoter
 	log     *slog.Logger
 	now     func() time.Time
 	entropy io.Reader
@@ -108,6 +119,7 @@ func New(opts Options) (*Server, error) {
 		maxBody: opts.MaxBodyBytes,
 		sink:    opts.Sink,
 		control: opts.Control,
+		usage:   opts.Usage,
 		log:     opts.Logger,
 		now:     opts.Now,
 		entropy: opts.Entropy,
@@ -406,7 +418,32 @@ func (s *Server) statusline(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	if s.usage != nil && weekMissing(body) {
+		s.usage.WeekMissing()
+	}
 	s.enqueue(w, r, body, record.Hook{})
+}
+
+// weekMissing reports whether a statusline's rate_limits has a five-hour
+// window and no seven-day one: a plan whose only week is a model's own
+// (ADR 2026-10.mhj3). It reads whether the two keys hold a value, nothing
+// else of the body.
+func weekMissing(body []byte) bool {
+	var v struct {
+		RateLimits *struct {
+			FiveHour json.RawMessage `json:"five_hour"`
+			SevenDay json.RawMessage `json:"seven_day"`
+		} `json:"rate_limits"`
+	}
+	if json.Unmarshal(body, &v) != nil || v.RateLimits == nil {
+		return false
+	}
+	return hasValue(v.RateLimits.FiveHour) && !hasValue(v.RateLimits.SevenDay)
+}
+
+// hasValue is a key that is there and not null.
+func hasValue(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
 }
 
 func (s *Server) ping(w http.ResponseWriter, r *http.Request) {

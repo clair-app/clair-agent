@@ -38,6 +38,7 @@ an explanation, that explanation belongs in the ADR.
 | the `windows` CI job, the Windows runner, `.gitattributes` for `testdata/`, or checking anything on Windows | [ADR 2026-09.6w38](../memory/decisions/2026-09-6w38-windows-is-checked-on-the-instance-runner-tagged-windows.md) |
 | `internal/supervisor`, `clair daemon -supervise`, `Manager.RestartsOnCrash`, a crash restart or a logoff on Windows | [ADR 2026-09.pz5g](../memory/decisions/2026-09-pz5g-on-windows-the-daemon-supervises-itself.md) |
 | `internal/update`, `clair update`, the release keys or signature, `RELEASE_TEST_KEY`, `tools/releasesign`, `autoUpdate`, or the idea of the daemon restarting itself | [ADR 2026-09.qk6v](../memory/decisions/2026-09-qk6v-the-agent-updates-itself-in-the-background-from-signed-releases.md) |
+| `internal/usage`, `/clair/v1/usage`, `hookserver.UsageNoter`, what the `/statusline` handler reads, or running `claude` from the agent | [ADR 2026-10.mhj3](../memory/decisions/2026-10-mhj3-the-agent-reads-a-model-s-weekly-limit-from-claude-get-usage-when-the.md): the statusline is read for two keys and forwarded unchanged, and Claude Code, never the agent, holds the credentials |
 | `internal/ctl`'s JSON, a `/clair/v1` or `/clair/ctl` path, a field of `agent.json` or a pair file, or a flag of `clair daemon`, `hook-event` or `statusline` — removing or changing any of them | [ADR 2026-09.66m4](../memory/decisions/2026-09-66m4-the-cli-on-disk-may-be-newer-than-the-running-daemon.md) |
 
 Add a row when an ADR guards something a future edit is likely to touch; not every ADR

@@ -2,11 +2,12 @@
 
 **The design is not in this repository.** It is `docs/RELAY.md` in the `clair` repository
 (the phone/watch app) — normally a sibling checkout at `../clair`, i.e.
-`../clair/docs/RELAY.md` (revision 2026-10-10 **r14**: r2 folded in this implementation's
+`../clair/docs/RELAY.md` (revision 2026-10-12 **r15**: r2 folded in this implementation's
 corrections, r3 the presence rule, r8 canonical v2 signing, r9 the pairing and revoke seams, r10 the
 timeout cancel, r11 the phone's idle stream, r12 what marks a background agent's decide, r13 the
 `PostToolBatch` that closes a prompt answered at the terminal with feedback, r14 the `StopFailure` and
-quota-resume Notification that end and resume a turn stopped at a usage limit — its "Revision" lists are the
+quota-resume Notification that end and resume a turn stopped at a usage limit, r15 the agent's own `/usage`
+record, a model's weekly window for a plan with no account-wide week — its "Revision" lists are the
 diff). Read it before any design-level work;
 this page is the map from its sections to this codebase, not a copy. If the sibling checkout
 is missing, ask for it rather than working from memory: the document is revisioned and the
@@ -39,7 +40,11 @@ the behaviour. See "Relay contract" below.
   ADRs 2026-09.34qh and 2026-10.gw8w). The decide hook's own `X-Clair-Entrypoint` header, filled
   in by Claude Code from its environment, keeps a `claude -p` run's decide held; it is read on
   the loopback and never forwarded. The loopback server also checks that `session_id` is
-  *present* (the phone's 400 rule) and never reads it.
+  *present* (the phone's 400 rule) and never reads it. Of a `/statusline` body it reads only
+  whether `rate_limits.five_hour` and `rate_limits.seven_day` hold a value: a five-hour window
+  with no week has the agent ask Claude Code's `get_usage` for each model's own week, at most
+  every 10 min, and send it as a `/usage` request of its own (r15, ADR 2026-10.mhj3). The
+  statusline itself is forwarded unchanged.
 - The phone is trusted to answer prompts, not to act on the host. Its decide answer is checked
   against the held request — `tool_name`, `tool_input`, `permission_suggestions`, read at answer
   time only — and rebuilt (`internal/hookout`, ADR 2026-09.w4ww); its snippets are rebuilt from
@@ -51,7 +56,7 @@ the behaviour. See "Relay contract" below.
 
 | RELAY.md | Package | What it owns |
 | --- | --- | --- |
-| §4, §4.1 | `internal/hookserver`, `internal/record`, `internal/hookout` | Loopback listener on `127.0.0.1:7317` with `HookServer`'s bearer-and-path contract; tunnel records (`request` / `response` / `control`); `/hook/event`, `/statusline`, `/ping` answered `204` locally, a `PostToolBatch` queued only while the pair holds a decide (`record.Forwarded`, ADR 2026-10.ukr9); `/hook/decide` held open until the response record or the deadline, and answered only with what the request allows; `/status` answered locally |
+| §4, §4.1 | `internal/hookserver`, `internal/record`, `internal/hookout` | Loopback listener on `127.0.0.1:7317` with `HookServer`'s bearer-and-path contract; tunnel records (`request` / `response` / `control`); `/hook/event`, `/statusline`, `/ping` answered `204` locally, a `PostToolBatch` queued only while the pair holds a decide (`record.Forwarded`, ADR 2026-10.ukr9); `/hook/decide` held open until the response record or the deadline, and answered only with what the request allows; `/status` answered locally; a statusline with a five-hour window and no week kicks `internal/usage`, which reads each model's own week from a headless `claude -p` `get_usage` and sends it as the agent's own `/usage` request, `soon` (r15, ADR 2026-10.mhj3) |
 | §4.2 | `internal/tunnel` | One bounded FIFO per pair (draft 2 000 records / 16 MiB), shedding `no` first, then `soon`, never `now`; in memory; `reset` on start, `cancel {reqId, reason}` when Claude Code abandons a decide (`client`), the terminal takes it (`terminal`), the agent stops (`stop`) or the hold runs out, 2 s before Claude Code's own timeout (`timeout`, ADR 2026-09.72gv) |
 | §4.3 | `internal/presence`, `internal/tunnel` | Terminal input idle from pty access times (`/dev/pts/*`, `/dev/ttys*`) or `GetLastInputInfo`; stamped as `X-Clair-Idle-Ms` on every request record; a bubbled decide (`record.Hook.Bubbled`: an `agent_id` or `bubble`, in an interactive session by its `X-Clair-Entrypoint`, ADR 2026-10.gw8w) is released to the terminal at once while the idle is under the phone's threshold (`hello.presence` / `policy`, default 120 s, 0 = off), or when someone returns while it is held; flips while a decide is held go out as `/hook/presence` requests (`now`) |
 | §5.1 | `internal/identity`, `internal/state` | Host X25519 + Ed25519 seeds in `host.key` (0600) under `os.UserConfigDir()/clair` — `~/.config/clair` on Linux, `~/Library/Application Support/clair` on macOS, `%AppData%\clair` on Windows; `CLAIR_CONFIG_DIR` overrides |

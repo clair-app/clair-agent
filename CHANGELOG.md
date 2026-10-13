@@ -10,7 +10,7 @@ product:
   versioning: semver
   category: developer-tools
 document:
-  updated: 2026-10-05T22:14:45Z
+  updated: 2026-10-12T18:00:00Z
   canonical: https://github.com/clair-app/clair-agent/blob/main/CHANGELOG.md
 ---
 
@@ -22,6 +22,11 @@ This file is a [Declarative Changelog](https://whatsnew.fyi/spec). It starts at 
 
 ### Added
 
+- On plans with no overall weekly limit, such as a Team plan whose only weekly limit is Fable's, the agent now
+  sends that model's weekly usage to your phone, so the watch face's weekly meter has a figure. Claude Code's
+  statusline doesn't report that limit, so the agent asks Claude Code for it, at most every 10 minutes, by
+  starting `claude` briefly with no hooks and no session. Claude Code keeps your login, and plans with an overall
+  weekly limit are never asked. Needs the Clair app release that reads it.
 - The agent now also installs a `StopFailure` hook and a second `Notification` hook in Claude Code's
   `settings.json`, next to its permission hook. When a turn stops on an error such as your claude.ai usage
   limit, your phone and watch hear that it ended, so the session no longer shows as working while it waits

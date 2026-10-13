@@ -186,6 +186,11 @@ func TestWireFormPerKind(t *testing.T) {
 			r:    Record{N: 5, Kind: KindRequest, ReqID: reqID, Path: PathPresence, Headers: map[string]string{IdleHeader: "3400"}, Body: []byte(`{"idleMs":3400}`)},
 			want: `{"n":5,"kind":"request","reqId":"` + reqID + `","path":"/clair/v1/hook/presence","headers":{"X-Clair-Idle-Ms":"3400"},"body":{"idleMs":3400}}`,
 		},
+		{
+			name: "usage request",
+			r:    Record{N: 6, Kind: KindRequest, ReqID: reqID, Path: PathUsage, Headers: map[string]string{HostHeader: "walter-laptop"}, Body: []byte(`{"seven_day_models":[{"model":"Fable","used_percentage":4,"resets_at":1792252800}]}`)},
+			want: `{"n":6,"kind":"request","reqId":"` + reqID + `","path":"/clair/v1/usage","headers":{"X-Clair-Host":"walter-laptop"},"body":{"seven_day_models":[{"model":"Fable","used_percentage":4,"resets_at":1792252800}]}}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

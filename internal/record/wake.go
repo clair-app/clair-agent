@@ -50,7 +50,7 @@ const EventStopFailure = "StopFailure"
 // hop earlier). The path decides first: a decide is `now`, and so is a
 // presence change — it is only sent while a decide is held, and it is the
 // moment a prompt delivered quietly must start to buzz (§4.3); the
-// statusline and the installer's ping are `soon`. Then the event name: turn
+// statusline, the agent's usage report and the installer's ping are `soon`. Then the event name: turn
 // boundaries, a turn ended by an API error included, are `soon`; tool churn
 // is `no`, except that the PostToolUse or PostToolBatch which closes an action
 // answered in the terminal is `soon` while a decide is held.
@@ -58,7 +58,7 @@ func Wake(path, hookEventName string, decideHeld bool) envelope.Wake {
 	switch path {
 	case PathDecide, PathPresence:
 		return envelope.WakeNow
-	case PathStatusline, PathPing:
+	case PathStatusline, PathUsage, PathPing:
 		return envelope.WakeSoon
 	}
 	switch hookEventName {

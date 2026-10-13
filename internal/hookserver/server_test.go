@@ -653,3 +653,52 @@ func TestNewRequiresSinkAndEntropy(t *testing.T) {
 		t.Error("New without entropy: want an error")
 	}
 }
+
+// countingUsage counts the statuslines it hears of.
+type countingUsage struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *countingUsage) WeekMissing() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+}
+
+func TestStatuslineWithoutAWeekIsNoted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "a five-hour window and no week", body: `{"session_id":"s","rate_limits":{"five_hour":{"used_percentage":19,"resets_at":1792202400}}}`, want: true},
+		{name: "a null week", body: `{"rate_limits":{"five_hour":{"used_percentage":19},"seven_day":null}}`, want: true},
+		{name: "both windows", body: `{"rate_limits":{"five_hour":{"used_percentage":19},"seven_day":{"used_percentage":4}}}`},
+		{name: "a week alone", body: `{"rate_limits":{"seven_day":{"used_percentage":4}}}`},
+		{name: "a gateway's spend limit alone", body: `{"rate_limits":{"spend_limit":{"used_percentage":40}}}`},
+		{name: "no plan limits", body: `{"session_id":"s","context_window":{"used_percentage":12}}`},
+		{name: "null plan limits", body: `{"rate_limits":null}`},
+		{name: "plan limits that are not an object", body: `{"rate_limits":"five_hour"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sink := &fakeSink{}
+			usage := &countingUsage{}
+			s, err := New(Options{Token: token, Sink: sink, Usage: usage, Entropy: rand.Reader})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			rec := do(t, s, "POST", record.PathStatusline, "Bearer "+token, strings.NewReader(tt.body), nil)
+			if rec.Code != 204 || len(sink.enqueued) != 1 {
+				t.Fatalf("status = %d, enqueued %d; want 204 and the statusline forwarded as ever", rec.Code, len(sink.enqueued))
+			}
+			if got := usage.n == 1; got != tt.want {
+				t.Fatalf("noted %d times for %s, want noted = %v", usage.n, tt.body, tt.want)
+			}
+		})
+	}
+}

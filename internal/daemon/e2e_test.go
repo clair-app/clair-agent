@@ -21,12 +21,14 @@ import (
 	"claircode.app/clair-agent/internal/ctl"
 	"claircode.app/clair-agent/internal/daemon"
 	"claircode.app/clair-agent/internal/envelope"
+	"claircode.app/clair-agent/internal/hostname"
 	"claircode.app/clair-agent/internal/identity"
 	"claircode.app/clair-agent/internal/presence"
 	"claircode.app/clair-agent/internal/record"
 	"claircode.app/clair-agent/internal/relay"
 	"claircode.app/clair-agent/internal/relay/relaytest"
 	"claircode.app/clair-agent/internal/state"
+	"claircode.app/clair-agent/internal/usage"
 )
 
 const pairID = "AAAAAAAAAAAAAAAAAAAAAA"
@@ -164,9 +166,24 @@ type world struct {
 	phone   *phone
 	inst    *installer
 	sampler *sampler
+	usage   *usageProbe
 	addr    string
 	done    chan error
 	stop    context.CancelFunc
+}
+
+// usageProbe stands in for Claude Code's get_usage, so no test runs claude.
+type usageProbe struct {
+	mu    sync.Mutex
+	calls int
+	weeks []usage.Week
+}
+
+func (u *usageProbe) probe(context.Context) ([]usage.Week, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.calls++
+	return u.weeks, nil
 }
 
 // sampler is the host's terminal-input reading, moved by the test.
@@ -232,7 +249,7 @@ func newWorld(t *testing.T) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &world{fake: fake, dir: dir, agent: agent, hostKey: base64.RawURLEncoding.EncodeToString(host.AuthPublic()), inst: &installer{}, sampler: &sampler{idle: 5 * time.Second}}
+	w := &world{fake: fake, dir: dir, agent: agent, hostKey: base64.RawURLEncoding.EncodeToString(host.AuthPublic()), inst: &installer{}, sampler: &sampler{idle: 5 * time.Second}, usage: &usageProbe{weeks: []usage.Week{}}}
 	w.phone = &phone{t: t, keys: phoneSide, client: phoneClient, seen: make(chan *record.Record, 64), wakes: make(map[uint64]envelope.Wake)}
 
 	phoneCtx, stopPhone := context.WithCancel(t.Context())
@@ -260,6 +277,7 @@ func (w *world) start(t *testing.T) {
 		done <- daemon.Run(ctx, daemon.Options{
 			Dir: w.dir, Agent: w.agent, Listen: "127.0.0.1:0", Version: "test",
 			Now: time.Now, Entropy: rand.Reader, Installer: w.inst, Presence: w.sampler, Ready: ready,
+			UsageProbe: w.usage.probe,
 		})
 	}()
 	select {
@@ -466,6 +484,56 @@ func TestEndToEnd(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("daemon did not stop")
+	}
+}
+
+// TestStatuslineWithoutAWeekSendsTheModelWeeks is ADR 2026-10.mhj3 end to
+// end: a statusline with a five-hour window and no seven-day one reaches the
+// phone as ever, and the agent follows it with each model's week as a request
+// of its own; a second statusline inside the interval probes nothing.
+func TestStatuslineWithoutAWeekSendsTheModelWeeks(t *testing.T) {
+	t.Parallel()
+
+	w := newWorld(t)
+	ctx := t.Context()
+	w.usage.mu.Lock()
+	w.usage.weeks = []usage.Week{{Model: "Fable", UsedPercentage: 4, ResetsAt: 1792252800}}
+	w.usage.mu.Unlock()
+	for _, control := range []record.Control{record.ControlHelloAck, record.ControlReset} {
+		if rec := w.phone.next(t); rec.Control != control {
+			t.Fatalf("record = %+v, want %s", rec, control)
+		}
+	}
+
+	statusline := `{"session_id":"sess-1","rate_limits":{"five_hour":{"used_percentage":19,"resets_at":1792202400}}}`
+	for range 2 {
+		if code, _, _ := w.hook(ctx, t, record.PathStatusline, statusline); code != http.StatusNoContent {
+			t.Fatalf("statusline = %d, want 204", code)
+		}
+	}
+	paths := make(map[string]int)
+	var report *record.Record
+	for range 3 {
+		rec := w.phone.next(t)
+		paths[rec.Path]++
+		if rec.Path == record.PathUsage {
+			report = rec
+		}
+	}
+	if paths[record.PathStatusline] != 2 || report == nil {
+		t.Fatalf("the phone got %v, want both statuslines and a usage report", paths)
+	}
+	if want := `{"seven_day_models":[{"model":"Fable","used_percentage":4,"resets_at":1792252800}]}`; string(report.Body) != want || report.Kind != record.KindRequest {
+		t.Errorf("usage report = %+v body %s, want a request with %s", report, report.Body, want)
+	}
+	if host := report.Headers[record.HostHeader]; !hostname.Valid(host) {
+		t.Errorf("usage report host = %q, want the daemon's own name", host)
+	}
+	w.usage.mu.Lock()
+	calls := w.usage.calls
+	w.usage.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("probes = %d, want 1 for two statuslines inside the interval", calls)
 	}
 }
 
