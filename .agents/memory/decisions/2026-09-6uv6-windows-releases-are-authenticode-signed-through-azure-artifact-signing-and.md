@@ -20,10 +20,8 @@ flashed several windows. It looked like the agent spawning something, but it was
 - A console program started from PowerShell shares its console and never gets its own
   `conhost`. That one got a new console, which is the window that flashed.
 - The builds were unsigned, and antivirus holds back unknown unsigned programs.
-- The maintainer already signs the a desktop app through Azure Artifact Signing. That
-  is subscription `…`, account `the signing account` (Basic, East US), and Public Trust
-  profile `the certificate profile`, as an individual:
-  `CN=Jeffrey Mixon, O=Jeffrey Mixon`.
+- The maintainer already holds an Azure Artifact Signing account (Basic plan) with a Public
+  Trust certificate profile, verified as an individual: `CN=Jeffrey Mixon`.
 
 **What changed.** A release tag runs four jobs (`.gitlab-ci.yml`):
 
@@ -49,25 +47,16 @@ flashed several windows. It looked like the agent spawning something, but it was
    - `SHA256SUMS.txt` is then written over the signed bytes. clair-web pins those, and signs
      them for the self-update, unchanged.
 
-**The credentials.** `sign` uses the signing app registration, not another app's, so either
-can be revoked alone.
+**The credentials.** `sign` uses an Entra ID app registration of its own, shared with nothing
+else, so it can be revoked alone.
 
-- It holds *Artifact Signing Certificate Profile Signer* on `the certificate profile` only.
-- Its client secret sits in `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET`,
-  which are protected variables scoped to the `windows-signing` environment. The secret is also
-  masked.
+- It holds *Artifact Signing Certificate Profile Signer* on the one certificate profile only.
+- Its client secret sits in `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET`, and
+  the `<account>/<certificate profile>` pair in `SIGN_ALIAS`. All four are protected variables
+  scoped to the `windows-signing` environment, and the secret is also masked.
 - `v*` tags are protected (Maintainers create them). Only a protected tag's pipeline, and in it
   only `sign`, can read the variables. Without them, `sign` fails and nothing is uploaded.
-
-To renew the secret before it expires, as a user who owns the app:
-
-```sh
-APP=$(az ad app list --display-name the signing app --query '[0].appId' -o tsv)
-az ad app credential reset --id "$APP" --append --display-name gitlab-ci --years 1 --query password -o tsv |
-  glab variable update AZURE_CLIENT_SECRET --scope windows-signing -R clair/clair-agent
-```
-
-Then delete the old secret with `az ad app credential delete`.
+- Renewing the secret before it expires is a maintainer runbook, kept outside this repository.
 
 **The alternatives.**
 

@@ -121,9 +121,10 @@ dist:
 # (ADR 2026-09.6uv6), with jsign: a Java signer that speaks the service's API, so no Windows
 # machine or signtool is needed. The certificates live three days, so every signature carries
 # an RFC 3161 timestamp or it goes invalid in users' hands. AZURE_TENANT_ID, AZURE_CLIENT_ID and
-# AZURE_CLIENT_SECRET (the signing app registration) are protected variables scoped to
-# the windows-signing environment: only this job, on a protected `v*` tag, can read them. The
-# job hands on only signed/, and `release` checks each file against `dist`'s own build.
+# AZURE_CLIENT_SECRET (the signing app registration's), and SIGN_ALIAS (`<account>/<certificate
+# profile>`), are protected variables scoped to the windows-signing environment: only this job,
+# on a protected `v*` tag, can read them. The job hands on only signed/, and `release` checks
+# each file against `dist`'s own build.
 sign:
   extends: .release-tag
   stage: release
@@ -137,11 +138,10 @@ sign:
     JSIGN_VERSION: "7.5"
     JSIGN_SHA256: 602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c
     SIGN_ENDPOINT: eus.codesigning.azure.net
-    SIGN_ALIAS: $SIGN_ALIAS  # <account>/<certificate profile>
   script:
     - |
-      [ -n "$AZURE_TENANT_ID" ] && [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ] || {
-        echo "sign: no AZURE_* variables here; they reach only a protected v* tag (ADR 2026-09.6uv6)" >&2; exit 1; }
+      [ -n "$AZURE_TENANT_ID" ] && [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ] && [ -n "$SIGN_ALIAS" ] || {
+        echo "sign: no AZURE_* or SIGN_ALIAS variables here; they reach only a protected v* tag (ADR 2026-09.6uv6)" >&2; exit 1; }
     - curl -fsSLo jsign.jar "https://github.com/ebourg/jsign/releases/download/$JSIGN_VERSION/jsign-$JSIGN_VERSION.jar"
     - echo "$JSIGN_SHA256  jsign.jar" | sha256sum -c
     - mkdir signed && cp dist/clair-windows-*.exe signed/

@@ -26,10 +26,9 @@ domain. EC2 Macs have no such login. Two checks that need no Mac came first, in 
 
 **What changed.**
 
-- `github.com/clair-app/clair-agent`, private, is a push mirror of this project. It is GitLab
-  a remote mirror: SSH, all branches, no divergent refs, and GitHub's published host keys
-  pinned. It authenticates with GitLab's mirror key as a write deploy key on that one
-  repository. A deploy key works on one repository, never expires, and belongs to no person.
+- A private GitHub repository is a push mirror of this project: all branches, no divergent
+  refs, authenticated with a deploy key that works on that one repository and belongs to no
+  person.
 - `.github/workflows/macos.yml` runs on `macos-26` (arm64) on release tags, on pushes to `main`
   that touch code the Mac runs, and on `workflow_dispatch`. Run 36063716695 (commit 27b6ad6,
   image `macos-26-arm64` 20260907, Go 1.26.8) showed:
@@ -63,8 +62,8 @@ what a runner cannot, but costs a day per check and nothing re-runs it.
 - Results show on GitHub only; GitLab's pipeline stays the gate and does not wait for them. A
   tag's macOS run is worth reading before pinning a release in clair-web.
 - **Push to GitLab, never to the mirror.** The next sync overwrites the mirror.
-- The mirror stops silently if the deploy key is removed or the org disables deploy keys again.
-  `glab api projects/<id>/remote_mirrors/<id>` shows `last_error`.
+- The mirror stops silently if its deploy key is removed; GitLab's mirror status shows the last
+  error.
 - Not covered, and left for a session on real hardware:
   - how the "Background Items Added" notification and the Login Items entry read to a person
   - presence from keystrokes (the runner has no `/dev/ttys*` of its own and reads "no signal")

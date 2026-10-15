@@ -29,6 +29,10 @@ matching the surrounding style over cleverness.
   the task against the trigger table in `.agents/rules/decisions.md`, then CONSULT
   `.agents/memory/decisions.md` — a generated router over one-file-per-decision ADRs; open the
   file whose row matches, don't work from the titles.
+- **For maintainer-only workflows a public clone doesn't include** (release infrastructure, CI
+  runners, signing credentials — and more over time): a local, gitignored **`.private/` overlay**
+  may be present. If `.private/AGENTS.md` exists, load it as a nested router (nearest-wins); it is
+  absent from public clones.
 
 ## Capabilities
 

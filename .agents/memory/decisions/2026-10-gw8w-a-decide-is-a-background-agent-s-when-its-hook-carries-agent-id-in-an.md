@@ -12,7 +12,7 @@ Status: Accepted (2026-10-05) · GitLab clair-agent#2; widens ADR 2026-09.34qh's
 gives the decide hook the one `allowedEnvVars` ADR 2026-09.ut2g had ruled out. RELAY.md r12 §4.3. Amended by
 ADR 2026-10.sm5c: an existing install gets the header at the daemon's next start.
 
-**What was observed.** On 2026-10-05 (the maintainer's workstation, Claude Code 2.1.289, an auto-mode session) a background
+**What was observed.** On 2026-10-05 (the maintainer's Linux workstation, Claude Code 2.1.289, an auto-mode session) a background
 `mesh-lab-reviewer` agent asked to run a `Bash` command. Its hook said `permission_mode: "auto"`, so
 the agent held it as a main-agent prompt for the full 24 h hook timeout. Half an hour later `clair status`
 showed it still held with terminal input idle 15 s, the terminal showed nothing, and the main session

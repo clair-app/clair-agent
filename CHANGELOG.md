@@ -80,7 +80,7 @@ This file is a [Declarative Changelog](https://whatsnew.fyi/spec). It starts at 
   whatever the session's permission mode or the agent's type. Before, only a forked agent in a
   default-mode session got there. Any other agent's prompt, including every one in auto mode, waited
   up to a day for your watch or phone with nothing in the terminal. When you're away, prompts still
-  go to your watch. ([#2](https://gitlab.invalid/clair/clair-agent/-/issues/2))
+  go to your watch.
 
 ## [0.3.1](https://github.com/clair-app/clair-agent/releases/tag/v0.3.1) — 2026-09-28T03:44:45Z
 
@@ -92,7 +92,7 @@ This file is a [Declarative Changelog](https://whatsnew.fyi/spec). It starts at 
 - When nobody answers a prompt before its hook timeout, the phone now shows it as expired. It used
   to say Handled in terminal while the prompt was still open there, or keep it on the phone until
   it went stale. To tell the phone in time, the agent now lets go of a prompt 2 seconds before the
-  timeout. ([#1](https://gitlab.invalid/clair/clair-agent/-/issues/1))
+  timeout.
 - A first `clair service install` on a new machine, which the `install.sh` and `install.ps1`
   one-liners run, no longer reports that the service didn't start. The service was running, but
   the readiness check didn't carry the admin token the install had just created.

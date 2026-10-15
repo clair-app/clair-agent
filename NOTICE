@@ -1,0 +1,7 @@
+Clair agent
+Copyright 2026 Jeffrey Walter Mixon
+
+This product includes software developed by The Go Authors: the Go standard
+library, golang.org/x/crypto, golang.org/x/sys, golang.org/x/term and
+rsc.io/qr, each under a BSD 3-Clause license. Their notices are in
+THIRD-PARTY-NOTICES.md.

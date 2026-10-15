@@ -22,3 +22,7 @@ coverage.out
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+# Private maintainer overlay: a separate, nested git repository holding release infrastructure,
+# CI runner and signing-account details, and personal files — never part of the public repo.
+.private/

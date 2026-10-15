@@ -12,7 +12,7 @@ Status: Accepted (2026-10-10) · amends ADR 2026-10.ukr9 (an agent event may sha
 group, told apart by its matcher, and not every agent event is gated) · pairs with the phone's usage-limit ADR ·
 RELAY.md r14
 
-**What was observed.** On 2026-10-10 the maintainer's workstation's sessions hit the claude.ai five-hour limit at 00:59 PDT. The
+**What was observed.** On 2026-10-10 the maintainer's sessions hit the claude.ai five-hour limit at 00:59 PDT. The
 transcripts hold 16 synthetic assistant messages, `"You've hit your session limit · resets 4:20am
 (America/Los_Angeles)"`, each with `error: "rate_limit"`, `apiError: "usage_limit_reached"` and
 `rateLimitType: "five_hour"`. The phone and watch kept every one of those sessions on Working until Claude Code

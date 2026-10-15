@@ -1,6 +1,6 @@
 # clair agent
 
-`clair` is the host-side agent of [Clair](../clair), a Wear OS / phone companion for Claude
+`clair` is the host-side agent of [Clair](https://claircode.app), a Wear OS / phone companion for Claude
 Code. It runs on the dev machine as a user-level daemon, receives Claude Code's `http` hooks on
 `127.0.0.1:7317`, and tunnels them — end-to-end encrypted — through a blind relay to the phone.
 The relay and Google's push infrastructure only ever see ciphertext.
@@ -89,3 +89,14 @@ generated `.agents/memory/decisions.md`. Add one with
 `go run ./tools/adr new "<title>" -topics a,b`, write the body, then
 `go run ./tools/adr index`. Ids are `YYYY-MM.suffix`, minted at random, so parallel worktrees
 never collide on a number.
+
+## Contributing and security
+
+Contributions are welcome within the expectations in [`CONTRIBUTING.md`](CONTRIBUTING.md); commits
+carry a DCO sign-off. Report vulnerabilities privately, as [`SECURITY.md`](SECURITY.md) describes.
+
+## License
+
+Copyright 2026 Jeffrey Walter Mixon. Licensed under the [Apache License, Version 2.0](LICENSE); see
+[`NOTICE`](NOTICE). The binary also contains the Go standard library and four BSD-licensed modules,
+whose notices are in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
